@@ -92,8 +92,9 @@ set_target_properties(obs-airplay-receiver PROPERTIES
 
 # Install to OBS plugin directory
 if(WIN32)
-    set(OBS_PLUGIN_DEST "$ENV{APPDATA}/obs-studio/plugins/obs-airplay-receiver/bin/64bit")
-    set(OBS_DATA_DEST "$ENV{APPDATA}/obs-studio/plugins/obs-airplay-receiver/data")
+    # OBS on Windows scans %PROGRAMDATA%/obs-studio/plugins/, not %APPDATA%
+    set(OBS_PLUGIN_DEST "$ENV{PROGRAMDATA}/obs-studio/plugins/obs-airplay-receiver/bin/64bit")
+    set(OBS_DATA_DEST "$ENV{PROGRAMDATA}/obs-studio/plugins/obs-airplay-receiver/data")
 else()
     set(OBS_PLUGIN_DEST "$ENV{HOME}/.config/obs-studio/plugins/obs-airplay-receiver/bin/64bit")
     set(OBS_DATA_DEST "$ENV{HOME}/.config/obs-studio/plugins/obs-airplay-receiver/data")
