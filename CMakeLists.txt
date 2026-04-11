@@ -8,15 +8,17 @@ set(DEPS_DIR "${CMAKE_SOURCE_DIR}/deps")
 set(OBS_SRC_DIR "${DEPS_DIR}/obs-sdk/obs-studio-32.1.1")
 set(OBS_LIB_FILE "${DEPS_DIR}/obs.lib")
 
-# FFmpeg dev
-set(FFMPEG_DEV_DIR "${DEPS_DIR}/ffmpeg-master-latest-win64-gpl-shared")
+# FFmpeg dev (matching OBS's FFmpeg version - 7.x)
+set(FFMPEG_INCLUDE_DIR "${DEPS_DIR}/ffmpeg7-include")
+set(FFMPEG_LIB_DIR "${DEPS_DIR}/obs-ffmpeg-libs")
 
 # Allow overrides
 if(DEFINED OBS_DIR)
     set(OBS_SRC_DIR "${OBS_DIR}")
 endif()
 if(DEFINED FFMPEG_DIR)
-    set(FFMPEG_DEV_DIR "${FFMPEG_DIR}")
+    set(FFMPEG_INCLUDE_DIR "${FFMPEG_DIR}/include")
+    set(FFMPEG_LIB_DIR "${FFMPEG_DIR}/lib")
 endif()
 
 # --- Plugin shared library ---
@@ -41,16 +43,16 @@ target_include_directories(obs-airplay-receiver PRIVATE
     ${OBS_SRC_DIR}/UI/obs-frontend-api
     # w32-pthreads (OBS dependency on Windows)
     ${OBS_SRC_DIR}/deps/w32-pthreads
-    # FFmpeg headers
-    ${FFMPEG_DEV_DIR}/include
+    # FFmpeg headers (matching OBS's FFmpeg 7.x)
+    ${FFMPEG_INCLUDE_DIR}
 )
 
 # --- Link libraries ---
 # OBS
 target_link_libraries(obs-airplay-receiver PRIVATE ${OBS_LIB_FILE})
 
-# FFmpeg
-target_link_directories(obs-airplay-receiver PRIVATE ${FFMPEG_DEV_DIR}/lib)
+# FFmpeg (using OBS's FFmpeg 7.x import libs)
+target_link_directories(obs-airplay-receiver PRIVATE ${FFMPEG_LIB_DIR})
 target_link_libraries(obs-airplay-receiver PRIVATE
     avcodec
     avutil
