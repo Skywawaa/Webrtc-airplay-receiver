@@ -34,9 +34,11 @@
 #define MAX_FRAME_SIZE     (4 * 1024 * 1024) /* 4 MB max frame */
 
 /* AirPlay mirror packet types */
-#define MIRROR_PKT_VIDEO      0
-#define MIRROR_PKT_CODEC_DATA 1
-#define MIRROR_PKT_HEARTBEAT  2
+#define MIRROR_PKT_VIDEO        0
+#define MIRROR_PKT_CODEC_DATA   1
+#define MIRROR_PKT_HEARTBEAT    2
+#define MIRROR_PKT_AUDIO        3
+#define MIRROR_PKT_AUDIO_CODEC  4
 
 struct airplay_mirror {
 	struct airplay_mirror_config config;
@@ -298,6 +300,27 @@ static void handle_mirror_client(struct airplay_mirror *mirror, socket_t client)
 			}
 
 			free(annexb);
+			break;
+		}
+
+		case MIRROR_PKT_AUDIO: {
+			/* AAC audio frame */
+			if (mirror->config.on_audio_frame) {
+				mirror->config.on_audio_frame(
+					mirror->config.userdata, payload,
+					hdr.payload_size, hdr.timestamp);
+			}
+			break;
+		}
+
+		case MIRROR_PKT_AUDIO_CODEC: {
+			/* Audio codec configuration (AudioSpecificConfig) */
+			if (mirror->config.on_audio_frame) {
+				/* Pass config data with a special PTS marker */
+				mirror->config.on_audio_frame(
+					mirror->config.userdata, payload,
+					hdr.payload_size, UINT64_MAX);
+			}
 			break;
 		}
 

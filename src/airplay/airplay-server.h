@@ -9,12 +9,17 @@ typedef void (*airplay_video_callback)(void *userdata,
 				       const uint8_t *h264_data,
 				       size_t h264_size, uint64_t pts);
 
+typedef void (*airplay_audio_callback)(void *userdata,
+				       const uint8_t *aac_data,
+				       size_t aac_size, uint64_t pts);
+
 typedef void (*airplay_disconnect_callback)(void *userdata);
 
 struct airplay_server_config {
 	char name[256];
 	uint16_t port;
 	airplay_video_callback on_video_frame;
+	airplay_audio_callback on_audio_frame;
 	airplay_disconnect_callback on_disconnect;
 	void *userdata;
 };

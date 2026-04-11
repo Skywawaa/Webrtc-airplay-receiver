@@ -194,6 +194,7 @@ static void handle_stream_setup(struct airplay_server *srv, socket_t client,
 		struct airplay_mirror_config mcfg = {0};
 		mcfg.port = srv->config.port + 1; /* Mirror data port */
 		mcfg.on_video_frame = srv->config.on_video_frame;
+		mcfg.on_audio_frame = srv->config.on_audio_frame;
 		mcfg.on_disconnect = srv->config.on_disconnect;
 		mcfg.userdata = srv->config.userdata;
 

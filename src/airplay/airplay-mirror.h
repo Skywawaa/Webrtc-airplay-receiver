@@ -9,6 +9,7 @@ struct airplay_mirror;
 struct airplay_mirror_config {
 	uint16_t port;
 	airplay_video_callback on_video_frame;
+	airplay_audio_callback on_audio_frame;
 	airplay_disconnect_callback on_disconnect;
 	void *userdata;
 };

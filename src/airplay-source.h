@@ -24,6 +24,7 @@ typedef int socket_t;
 /* Forward declarations */
 struct airplay_server;
 struct video_decoder;
+struct audio_decoder;
 
 /* Main source data structure */
 struct airplay_source {
@@ -40,6 +41,9 @@ struct airplay_source {
 
 	/* Video decoder */
 	struct video_decoder *decoder;
+
+	/* Audio decoder */
+	struct audio_decoder *audio_dec;
 
 	/* Frame buffer */
 	pthread_mutex_t frame_mutex;

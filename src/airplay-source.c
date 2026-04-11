@@ -5,6 +5,7 @@
 #include "airplay-source.h"
 #include "airplay/airplay-server.h"
 #include "video-decoder.h"
+#include "audio-decoder.h"
 
 #include <obs-module.h>
 #include <util/platform.h>
@@ -61,6 +62,39 @@ static void on_video_frame(void *userdata, const uint8_t *h264_data,
 	pthread_mutex_unlock(&ctx->frame_mutex);
 }
 
+/* ---------- Audio callback ---------- */
+static void on_audio_frame(void *userdata, const uint8_t *aac_data,
+			   size_t aac_size, uint64_t pts)
+{
+	struct airplay_source *ctx = userdata;
+	if (!ctx || !ctx->running || !ctx->audio_dec)
+		return;
+
+	/* PTS == UINT64_MAX means this is codec config data */
+	if (pts == UINT64_MAX) {
+		audio_decoder_configure(ctx->audio_dec, aac_data, aac_size);
+		return;
+	}
+
+	/* Decode AAC to PCM */
+	struct decoded_audio audio = {0};
+	if (!audio_decoder_decode(ctx->audio_dec, aac_data, aac_size, pts,
+				  &audio))
+		return;
+
+	/* Push audio to OBS */
+	struct obs_source_audio obs_audio = {0};
+	obs_audio.data[0] = audio.data;
+	obs_audio.frames = audio.samples;
+	obs_audio.speakers = (audio.channels == 2) ? SPEAKERS_STEREO
+						    : SPEAKERS_MONO;
+	obs_audio.format = AUDIO_FORMAT_FLOAT;
+	obs_audio.samples_per_sec = audio.sample_rate;
+	obs_audio.timestamp = pts;
+
+	obs_source_output_audio(ctx->source, &obs_audio);
+}
+
 static void on_disconnect(void *userdata)
 {
 	struct airplay_source *ctx = userdata;
@@ -90,12 +124,19 @@ static void *airplay_create(obs_data_t *settings, obs_source_t *source)
 	ctx->source = source;
 	pthread_mutex_init(&ctx->frame_mutex, NULL);
 
-	/* Init decoder */
+	/* Init decoders */
 	ctx->decoder = video_decoder_create();
 	if (!ctx->decoder) {
 		blog(LOG_ERROR, "[AirPlay] Failed to create video decoder");
 		bfree(ctx);
 		return NULL;
+	}
+
+	ctx->audio_dec = audio_decoder_create();
+	if (!ctx->audio_dec) {
+		blog(LOG_WARNING,
+		     "[AirPlay] Failed to create audio decoder - "
+		     "audio will be unavailable");
 	}
 
 	airplay_update(ctx, settings);
@@ -120,6 +161,7 @@ static void airplay_start_server(struct airplay_source *ctx)
 	strncpy(cfg.name, ctx->server_name, sizeof(cfg.name) - 1);
 	cfg.port = ctx->airplay_port;
 	cfg.on_video_frame = on_video_frame;
+	cfg.on_audio_frame = on_audio_frame;
 	cfg.on_disconnect = on_disconnect;
 	cfg.userdata = ctx;
 
@@ -152,6 +194,9 @@ static void airplay_destroy(void *data)
 
 	if (ctx->decoder)
 		video_decoder_destroy(ctx->decoder);
+
+	if (ctx->audio_dec)
+		audio_decoder_destroy(ctx->audio_dec);
 
 	pthread_mutex_destroy(&ctx->frame_mutex);
 	bfree(ctx);
@@ -231,7 +276,8 @@ void airplay_source_register(void)
 
 	info.id = "airplay_receiver_source";
 	info.type = OBS_SOURCE_TYPE_INPUT;
-	info.output_flags = OBS_SOURCE_ASYNC_VIDEO | OBS_SOURCE_DO_NOT_DUPLICATE;
+	info.output_flags = OBS_SOURCE_ASYNC_VIDEO | OBS_SOURCE_AUDIO |
+			    OBS_SOURCE_DO_NOT_DUPLICATE;
 	info.get_name = airplay_get_name;
 	info.create = airplay_create;
 	info.destroy = airplay_destroy;
