@@ -65,6 +65,7 @@ if(WIN32)
     target_link_libraries(obs-airplay-receiver PRIVATE
         ws2_32 iphlpapi
         ${DEPS_DIR}/w32-pthreads.lib
+        ${DEPS_DIR}/dnssd.lib
     )
     target_compile_definitions(obs-airplay-receiver PRIVATE
         _CRT_SECURE_NO_WARNINGS
