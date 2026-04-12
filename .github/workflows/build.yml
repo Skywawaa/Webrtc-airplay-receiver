@@ -153,6 +153,7 @@ jobs:
           LIBRARY obs
           EXPORTS
               obs_register_source
+              obs_register_source_s
               obs_source_output_video
               obs_source_output_audio
               obs_data_get_string
@@ -170,8 +171,16 @@ jobs:
               obs_property_list_add_int
               obs_get_locale
               blog
+              blogva
               bzalloc
+              bmalloc
               bfree
+              bmemdup
+              bstrdup
+              text_lookup_destroy
+              text_lookup_getstr
+              obs_module_load_locale
+              obs_module_get_config_path
           EOFDEF
 
           cat > deps/w32-pthreads.def << 'EOFDEF'
