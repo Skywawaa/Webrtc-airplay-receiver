@@ -1,9 +1,10 @@
 /*
- * OBS AirPlay Source - creates the OBS source that displays AirPlay content
+ * OBS AirPlay Source - Uses UxPlay's raop library for the full
+ * AirPlay 2 mirroring protocol (FairPlay, pairing, encryption)
+ * and FFmpeg for video/audio decoding.
  */
 
 #include "airplay-source.h"
-#include "airplay/airplay-server.h"
 #include "video-decoder.h"
 #include "audio-decoder.h"
 
@@ -12,40 +13,151 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
-/* ---------- Forward declarations ---------- */
-static const char *airplay_get_name(void *unused);
-static void *airplay_create(obs_data_t *settings, obs_source_t *source);
-static void airplay_destroy(void *data);
-static void airplay_update(void *data, obs_data_t *settings);
-static obs_properties_t *airplay_get_properties(void *data);
-static void airplay_get_defaults(obs_data_t *settings);
-static uint32_t airplay_get_width(void *data);
-static uint32_t airplay_get_height(void *data);
-static void airplay_video_tick(void *data, float seconds);
+/* UxPlay's raop API */
+#include "raop.h"
+#include "dnssd.h"
+#include "stream.h"
+#include "logger.h"
 
-/* ---------- Callback from AirPlay server when a frame arrives ---------- */
-static void on_video_frame(void *userdata, const uint8_t *h264_data,
-			   size_t h264_size, uint64_t pts)
+#ifdef _WIN32
+#include <winsock2.h>
+#include <iphlpapi.h>
+#include <process.h>
+#define getpid _getpid
+#endif
+
+struct airplay_source {
+	obs_source_t *source;
+
+	/* UxPlay components */
+	raop_t *raop;
+	dnssd_t *dnssd;
+
+	/* Decoders */
+	struct video_decoder *vdec;
+	struct audio_decoder *adec;
+
+	/* OBS output frames */
+	struct obs_source_frame vframe;
+	struct obs_source_audio aframe;
+
+	/* Settings */
+	char server_name[256];
+	bool use_random_mac;
+
+	/* State */
+	int width;
+	int height;
+	int open_connections;
+};
+
+/* ---------- MAC address helpers ---------- */
+
+static void generate_random_mac(char *mac, size_t len)
 {
-	struct airplay_source *ctx = userdata;
-	if (!ctx || !ctx->running)
+	srand((unsigned)(time(NULL) * getpid()));
+	int octet = (rand() % 64) << 2 | 0x02; /* locally administered */
+	snprintf(mac, len, "%02x:%02x:%02x:%02x:%02x:%02x",
+		 octet, rand() % 256, rand() % 256,
+		 rand() % 256, rand() % 256, rand() % 256);
+}
+
+#ifdef _WIN32
+static bool get_system_mac(char *mac, size_t len)
+{
+	ULONG buf_len = 15000;
+	PIP_ADAPTER_ADDRESSES addrs = (PIP_ADAPTER_ADDRESSES)malloc(buf_len);
+	if (!addrs) return false;
+
+	if (GetAdaptersAddresses(AF_INET, GAA_FLAG_INCLUDE_PREFIX, NULL,
+				 addrs, &buf_len) != NO_ERROR) {
+		free(addrs);
+		return false;
+	}
+
+	bool found = false;
+	for (PIP_ADAPTER_ADDRESSES p = addrs; p; p = p->Next) {
+		if ((p->IfType == IF_TYPE_ETHERNET_CSMACD ||
+		     p->IfType == IF_TYPE_IEEE80211) &&
+		    p->PhysicalAddressLength == 6) {
+			snprintf(mac, len, "%02x:%02x:%02x:%02x:%02x:%02x",
+				 p->PhysicalAddress[0], p->PhysicalAddress[1],
+				 p->PhysicalAddress[2], p->PhysicalAddress[3],
+				 p->PhysicalAddress[4], p->PhysicalAddress[5]);
+			found = true;
+			break;
+		}
+	}
+	free(addrs);
+	return found;
+}
+#endif
+
+static void parse_hw_addr(const char *str, char *hw, int *hw_len)
+{
+	*hw_len = 0;
+	for (size_t i = 0; i < strlen(str) && *hw_len < 6; i += 3) {
+		hw[(*hw_len)++] = (char)strtol(str + i, NULL, 16);
+	}
+}
+
+/* ---------- UxPlay callbacks ---------- */
+
+static void cb_conn_init(void *cls)
+{
+	struct airplay_source *ctx = cls;
+	ctx->open_connections++;
+	blog(LOG_INFO, "[AirPlay] Connection init (open: %d)",
+	     ctx->open_connections);
+}
+
+static void cb_conn_destroy(void *cls)
+{
+	struct airplay_source *ctx = cls;
+	ctx->open_connections--;
+	blog(LOG_INFO, "[AirPlay] Connection destroy (open: %d)",
+	     ctx->open_connections);
+	if (ctx->open_connections <= 0)
+		obs_source_output_video(ctx->source, NULL);
+}
+
+static void cb_conn_reset(void *cls, int timeouts, bool reset_video)
+{
+	struct airplay_source *ctx = cls;
+	blog(LOG_WARNING,
+	     "[AirPlay] Connection reset (timeouts=%d reset_video=%d)",
+	     timeouts, reset_video);
+	raop_stop(ctx->raop);
+}
+
+static void cb_conn_teardown(void *cls, bool *t96, bool *t110)
+{
+	(void)cls;
+	(void)t96;
+	(void)t110;
+	blog(LOG_INFO, "[AirPlay] Connection teardown");
+}
+
+static void cb_video_process(void *cls, raop_ntp_t *ntp,
+			     h264_decode_struct *data)
+{
+	(void)ntp;
+	struct airplay_source *ctx = cls;
+	if (!ctx->vdec)
 		return;
 
-	/* Decode H.264 to raw frame */
 	struct decoded_frame frame = {0};
-	if (!video_decoder_decode(ctx->decoder, h264_data, h264_size, pts,
-				  &frame))
+	if (!video_decoder_decode(ctx->vdec, data->data, data->data_len,
+				  data->pts, &frame))
 		return;
-
-	/* Push frame to OBS */
-	pthread_mutex_lock(&ctx->frame_mutex);
 
 	struct obs_source_frame obs_frame = {0};
 	obs_frame.format = VIDEO_FORMAT_NV12;
 	obs_frame.width = frame.width;
 	obs_frame.height = frame.height;
-	obs_frame.timestamp = pts;
+	obs_frame.timestamp = data->pts * 1000;
 
 	obs_frame.data[0] = frame.data[0];
 	obs_frame.data[1] = frame.data[1];
@@ -56,33 +168,21 @@ static void on_video_frame(void *userdata, const uint8_t *h264_data,
 
 	ctx->width = frame.width;
 	ctx->height = frame.height;
-	ctx->connected = true;
-	ctx->frame_ready = true;
-
-	pthread_mutex_unlock(&ctx->frame_mutex);
 }
 
-/* ---------- Audio callback ---------- */
-static void on_audio_frame(void *userdata, const uint8_t *aac_data,
-			   size_t aac_size, uint64_t pts)
+static void cb_audio_process(void *cls, raop_ntp_t *ntp,
+			     audio_decode_struct *data)
 {
-	struct airplay_source *ctx = userdata;
-	if (!ctx || !ctx->running || !ctx->audio_dec)
+	(void)ntp;
+	struct airplay_source *ctx = cls;
+	if (!ctx->adec)
 		return;
 
-	/* PTS == UINT64_MAX means this is codec config data */
-	if (pts == UINT64_MAX) {
-		audio_decoder_configure(ctx->audio_dec, aac_data, aac_size);
-		return;
-	}
-
-	/* Decode AAC to PCM */
 	struct decoded_audio audio = {0};
-	if (!audio_decoder_decode(ctx->audio_dec, aac_data, aac_size, pts,
-				  &audio))
+	if (!audio_decoder_decode(ctx->adec, data->data, data->data_len,
+				  data->ntp_time, &audio))
 		return;
 
-	/* Push audio to OBS */
 	struct obs_source_audio obs_audio = {0};
 	obs_audio.data[0] = audio.data;
 	obs_audio.frames = audio.samples;
@@ -90,190 +190,245 @@ static void on_audio_frame(void *userdata, const uint8_t *aac_data,
 						    : SPEAKERS_MONO;
 	obs_audio.format = AUDIO_FORMAT_FLOAT;
 	obs_audio.samples_per_sec = audio.sample_rate;
-	obs_audio.timestamp = pts;
+	obs_audio.timestamp = data->ntp_time * 1000;
 
 	obs_source_output_audio(ctx->source, &obs_audio);
 }
 
-static void on_disconnect(void *userdata)
+static void cb_audio_flush(void *cls) { (void)cls; }
+static void cb_video_flush(void *cls) { (void)cls; }
+static void cb_audio_set_volume(void *cls, float v) { (void)cls; (void)v; }
+static void cb_audio_set_metadata(void *cls, const void *b, int l)
 {
-	struct airplay_source *ctx = userdata;
-	if (!ctx)
-		return;
+	(void)cls; (void)b; (void)l;
+}
 
-	ctx->connected = false;
-	ctx->frame_ready = false;
+static void cb_audio_get_format(void *cls, unsigned char *ct,
+				unsigned short *spf, bool *usingScreen,
+				bool *isMedia, uint64_t *audioFormat)
+{
+	(void)cls;
+	*ct = 1; /* AAC-ELD */
+	(void)spf;
+	(void)usingScreen;
+	(void)isMedia;
+	(void)audioFormat;
+}
 
-	/* Clear the displayed frame */
-	obs_source_output_video(ctx->source, NULL);
+static void cb_video_report_size(void *cls, float *ws, float *hs,
+				 float *w, float *h)
+{
+	struct airplay_source *ctx = cls;
+	ctx->width = (int)*ws;
+	ctx->height = (int)*hs;
+	blog(LOG_INFO, "[AirPlay] Video size: %.0fx%.0f (source) %.0fx%.0f",
+	     *ws, *hs, *w, *h);
+}
 
-	blog(LOG_INFO, "[AirPlay] Client disconnected");
+static void cb_log(void *cls, int level, const char *msg)
+{
+	(void)cls;
+	int obs_level = LOG_DEBUG;
+	if (level <= RAOP_LOG_ERR) obs_level = LOG_ERROR;
+	else if (level <= RAOP_LOG_WARNING) obs_level = LOG_WARNING;
+	else if (level <= RAOP_LOG_INFO) obs_level = LOG_INFO;
+	blog(obs_level, "[AirPlay-UxPlay] %s", msg);
+}
+
+/* ---------- Server lifecycle ---------- */
+
+static bool start_server(struct airplay_source *ctx)
+{
+	raop_callbacks_t cbs;
+	memset(&cbs, 0, sizeof(cbs));
+	cbs.cls = ctx;
+	cbs.conn_init = cb_conn_init;
+	cbs.conn_destroy = cb_conn_destroy;
+	cbs.conn_reset = cb_conn_reset;
+	cbs.conn_teardown = cb_conn_teardown;
+	cbs.audio_process = cb_audio_process;
+	cbs.video_process = cb_video_process;
+	cbs.audio_flush = cb_audio_flush;
+	cbs.video_flush = cb_video_flush;
+	cbs.audio_set_volume = cb_audio_set_volume;
+	cbs.audio_get_format = cb_audio_get_format;
+	cbs.video_report_size = cb_video_report_size;
+	cbs.audio_set_metadata = cb_audio_set_metadata;
+
+	ctx->raop = raop_init(2, &cbs);
+	if (!ctx->raop) {
+		blog(LOG_ERROR, "[AirPlay] raop_init failed");
+		return false;
+	}
+
+	raop_set_plist(ctx->raop, "max_ntp_timeouts", 5);
+	unsigned short tcp[3] = {0, 0, 0};
+	unsigned short udp[3] = {0, 0, 0};
+	raop_set_tcp_ports(ctx->raop, tcp);
+	raop_set_udp_ports(ctx->raop, udp);
+	raop_set_log_callback(ctx->raop, cb_log, NULL);
+	raop_set_log_level(ctx->raop, RAOP_LOG_INFO);
+
+	unsigned short port = raop_get_port(ctx->raop);
+	raop_start(ctx->raop, &port);
+	raop_set_port(ctx->raop, port);
+
+	/* MAC address */
+	char mac_str[18] = {0};
+	if (ctx->use_random_mac) {
+		generate_random_mac(mac_str, sizeof(mac_str));
+	} else {
+#ifdef _WIN32
+		if (!get_system_mac(mac_str, sizeof(mac_str)))
+#endif
+			generate_random_mac(mac_str, sizeof(mac_str));
+	}
+
+	char hw[6];
+	int hw_len = 0;
+	parse_hw_addr(mac_str, hw, &hw_len);
+
+	int err = 0;
+	ctx->dnssd = dnssd_init(ctx->server_name,
+				(int)strlen(ctx->server_name),
+				hw, hw_len, &err);
+	if (err || !ctx->dnssd) {
+		blog(LOG_ERROR, "[AirPlay] dnssd_init failed (err=%d)", err);
+		raop_destroy(ctx->raop);
+		ctx->raop = NULL;
+		return false;
+	}
+
+	raop_set_dnssd(ctx->raop, ctx->dnssd);
+	dnssd_register_raop(ctx->dnssd, port);
+
+	unsigned short airplay_port = (port != 65535) ? port + 1 : port - 1;
+	dnssd_register_airplay(ctx->dnssd, airplay_port);
+
+	blog(LOG_INFO,
+	     "[AirPlay] Server started: '%s' port=%d mac=%s",
+	     ctx->server_name, port, mac_str);
+
+	return true;
+}
+
+static void stop_server(struct airplay_source *ctx)
+{
+	if (ctx->raop) {
+		raop_destroy(ctx->raop);
+		ctx->raop = NULL;
+	}
+	if (ctx->dnssd) {
+		dnssd_unregister_raop(ctx->dnssd);
+		dnssd_unregister_airplay(ctx->dnssd);
+		dnssd_destroy(ctx->dnssd);
+		ctx->dnssd = NULL;
+	}
 }
 
 /* ---------- OBS Source API ---------- */
 
 static const char *airplay_get_name(void *unused)
 {
-	UNUSED_PARAMETER(unused);
+	(void)unused;
 	return "AirPlay Receiver";
 }
 
 static void *airplay_create(obs_data_t *settings, obs_source_t *source)
 {
+#ifdef _WIN32
+	WSADATA wsa;
+	WSAStartup(MAKEWORD(2, 2), &wsa);
+#endif
+
 	struct airplay_source *ctx = bzalloc(sizeof(struct airplay_source));
 	ctx->source = source;
-	pthread_mutex_init(&ctx->frame_mutex, NULL);
+	ctx->width = 1920;
+	ctx->height = 1080;
 
-	/* Init decoders */
-	ctx->decoder = video_decoder_create();
-	if (!ctx->decoder) {
-		blog(LOG_ERROR, "[AirPlay] Failed to create video decoder");
-		bfree(ctx);
-		return NULL;
-	}
+	ctx->vdec = video_decoder_create();
+	ctx->adec = audio_decoder_create();
 
-	ctx->audio_dec = audio_decoder_create();
-	if (!ctx->audio_dec) {
-		blog(LOG_WARNING,
-		     "[AirPlay] Failed to create audio decoder - "
-		     "audio will be unavailable");
-	}
+	const char *name = obs_data_get_string(settings, "server_name");
+	strncpy(ctx->server_name,
+		(name && *name) ? name : "OBS AirPlay",
+		sizeof(ctx->server_name) - 1);
+	ctx->use_random_mac = obs_data_get_bool(settings, "use_random_mac");
 
-	airplay_update(ctx, settings);
-	return ctx;
-}
-
-static void airplay_stop_server(struct airplay_source *ctx)
-{
-	if (ctx->server) {
-		ctx->running = false;
-		airplay_server_stop(ctx->server);
-		airplay_server_destroy(ctx->server);
-		ctx->server = NULL;
-	}
-}
-
-static void airplay_start_server(struct airplay_source *ctx)
-{
-	airplay_stop_server(ctx);
-
-	struct airplay_server_config cfg = {0};
-	strncpy(cfg.name, ctx->server_name, sizeof(cfg.name) - 1);
-	cfg.port = ctx->airplay_port;
-	cfg.on_video_frame = on_video_frame;
-	cfg.on_audio_frame = on_audio_frame;
-	cfg.on_disconnect = on_disconnect;
-	cfg.userdata = ctx;
-
-	ctx->server = airplay_server_create(&cfg);
-	if (!ctx->server) {
-		blog(LOG_ERROR, "[AirPlay] Failed to create server");
-		return;
-	}
-
-	ctx->running = true;
-	if (!airplay_server_start(ctx->server)) {
+	if (!start_server(ctx)) {
 		blog(LOG_ERROR, "[AirPlay] Failed to start server");
-		ctx->running = false;
-		airplay_server_destroy(ctx->server);
-		ctx->server = NULL;
-		return;
 	}
 
-	blog(LOG_INFO, "[AirPlay] Server started: '%s' on port %d",
-	     ctx->server_name, ctx->airplay_port);
+	return ctx;
 }
 
 static void airplay_destroy(void *data)
 {
 	struct airplay_source *ctx = data;
-	if (!ctx)
-		return;
+	if (!ctx) return;
 
-	airplay_stop_server(ctx);
+	stop_server(ctx);
 
-	if (ctx->decoder)
-		video_decoder_destroy(ctx->decoder);
+	if (ctx->vdec) video_decoder_destroy(ctx->vdec);
+	if (ctx->adec) audio_decoder_destroy(ctx->adec);
 
-	if (ctx->audio_dec)
-		audio_decoder_destroy(ctx->audio_dec);
-
-	pthread_mutex_destroy(&ctx->frame_mutex);
 	bfree(ctx);
 }
 
 static void airplay_update(void *data, obs_data_t *settings)
 {
 	struct airplay_source *ctx = data;
-
 	const char *name = obs_data_get_string(settings, "server_name");
-	uint16_t port = (uint16_t)obs_data_get_int(settings, "port");
+	bool random_mac = obs_data_get_bool(settings, "use_random_mac");
 
 	bool need_restart = false;
-
-	if (strcmp(ctx->server_name, name) != 0) {
-		strncpy(ctx->server_name, name, sizeof(ctx->server_name) - 1);
+	if (name && strcmp(ctx->server_name, name) != 0) {
+		strncpy(ctx->server_name, name,
+			sizeof(ctx->server_name) - 1);
+		need_restart = true;
+	}
+	if (ctx->use_random_mac != random_mac) {
+		ctx->use_random_mac = random_mac;
 		need_restart = true;
 	}
 
-	if (ctx->airplay_port != port) {
-		ctx->airplay_port = port;
-		need_restart = true;
+	if (need_restart) {
+		stop_server(ctx);
+		start_server(ctx);
 	}
-
-	if (need_restart || !ctx->server)
-		airplay_start_server(ctx);
 }
 
 static obs_properties_t *airplay_get_properties(void *data)
 {
-	UNUSED_PARAMETER(data);
-
-	obs_properties_t *props = obs_properties_create();
-
-	obs_properties_add_text(props, "server_name", "AirPlay Server Name",
+	(void)data;
+	obs_properties_t *p = obs_properties_create();
+	obs_properties_add_text(p, "server_name", "Server Name",
 				OBS_TEXT_DEFAULT);
-
-	obs_properties_add_int(props, "port", "Port", 1024, 65535, 1);
-
-	obs_properties_add_bool(props, "hw_decode",
-				"Hardware Decoding (if available)");
-
-	return props;
+	obs_properties_add_bool(p, "use_random_mac",
+				"Use Random MAC Address");
+	return p;
 }
 
-static void airplay_get_defaults(obs_data_t *settings)
+static void airplay_get_defaults(obs_data_t *s)
 {
-	obs_data_set_default_string(settings, "server_name",
-				    "OBS AirPlay Receiver");
-	obs_data_set_default_int(settings, "port", 7000);
-	obs_data_set_default_bool(settings, "hw_decode", true);
+	obs_data_set_default_string(s, "server_name", "OBS AirPlay");
+	obs_data_set_default_bool(s, "use_random_mac", true);
 }
 
 static uint32_t airplay_get_width(void *data)
 {
-	struct airplay_source *ctx = data;
-	return ctx->width > 0 ? ctx->width : 1920;
+	return ((struct airplay_source *)data)->width;
 }
 
 static uint32_t airplay_get_height(void *data)
 {
-	struct airplay_source *ctx = data;
-	return ctx->height > 0 ? ctx->height : 1080;
-}
-
-static void airplay_video_tick(void *data, float seconds)
-{
-	UNUSED_PARAMETER(seconds);
-	struct airplay_source *ctx = data;
-	UNUSED_PARAMETER(ctx);
+	return ((struct airplay_source *)data)->height;
 }
 
 /* ---------- Register ---------- */
 void airplay_source_register(void)
 {
 	struct obs_source_info info = {0};
-
 	info.id = "airplay_receiver_source";
 	info.type = OBS_SOURCE_TYPE_INPUT;
 	info.output_flags = OBS_SOURCE_ASYNC_VIDEO | OBS_SOURCE_AUDIO |
@@ -286,7 +441,6 @@ void airplay_source_register(void)
 	info.get_defaults = airplay_get_defaults;
 	info.get_width = airplay_get_width;
 	info.get_height = airplay_get_height;
-	info.video_tick = airplay_video_tick;
 	info.icon_type = OBS_ICON_TYPE_DESKTOP_CAPTURE;
 
 	obs_register_source(&info);
