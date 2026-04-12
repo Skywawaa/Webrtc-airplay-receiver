@@ -16,7 +16,9 @@ set(FFMPEG_INCLUDE_DIR "${DEPS_DIR}/ffmpeg7-include")
 set(FFMPEG_LIB_DIR "${DEPS_DIR}/obs-ffmpeg-libs")
 
 # OpenSSL
-set(OPENSSL_DIR "C:/Users/kitti/scoop/apps/openssl/current")
+if(NOT DEFINED OPENSSL_DIR)
+    set(OPENSSL_DIR "C:/Users/kitti/scoop/apps/openssl/current")
+endif()
 
 # libplist
 set(LIBPLIST_DIR "${DEPS_DIR}/libplist-2.7.0")

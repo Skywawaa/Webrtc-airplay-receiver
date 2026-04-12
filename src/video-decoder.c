@@ -56,8 +56,10 @@ struct video_decoder *video_decoder_create(void)
 		return NULL;
 	}
 
-	/* Single-threaded for lowest latency */
+	/* Low latency config */
 	dec->ctx->thread_count = 1;
+	dec->ctx->flags |= AV_CODEC_FLAG_LOW_DELAY;
+	dec->ctx->flags2 |= AV_CODEC_FLAG2_FAST;
 
 	if (avcodec_open2(dec->ctx, dec->codec, NULL) < 0) {
 		fprintf(stderr, "[AirPlay] Failed to open H264 decoder\n");
@@ -190,40 +192,15 @@ bool video_decoder_decode(struct video_decoder *dec, const uint8_t *h264_data,
 	if (dec->frame->width == 0 || dec->frame->height == 0)
 		return false;
 
-	/* Convert to RGBA for OBS output */
-	int w = dec->frame->width;
-	int h = dec->frame->height;
-
-	if (w != dec->nv12_width || h != dec->nv12_height || !dec->sws) {
-		if (dec->sws)
-			sws_freeContext(dec->sws);
-		if (dec->nv12_data[0])
-			av_freep(&dec->nv12_data[0]);
-
-		dec->sws = sws_getContext(w, h,
-					 (enum AVPixelFormat)dec->frame->format,
-					 w, h, AV_PIX_FMT_RGBA,
-					 SWS_FAST_BILINEAR, NULL, NULL, NULL);
-		if (!dec->sws)
-			return false;
-
-		int size = av_image_alloc(dec->nv12_data, dec->nv12_linesize,
-					  w, h, AV_PIX_FMT_RGBA, 32);
-		if (size < 0)
-			return false;
-
-		dec->nv12_width = w;
-		dec->nv12_height = h;
-	}
-
-	sws_scale(dec->sws, (const uint8_t *const *)dec->frame->data,
-		  dec->frame->linesize, 0, h, dec->nv12_data,
-		  dec->nv12_linesize);
-
-	out_frame->data[0] = dec->nv12_data[0];
-	out_frame->linesize[0] = dec->nv12_linesize[0];
-	out_frame->width = w;
-	out_frame->height = h;
+	/* Zero-copy: pass YUV planes directly to OBS (no sws_scale) */
+	out_frame->data[0] = dec->frame->data[0];
+	out_frame->data[1] = dec->frame->data[1];
+	out_frame->data[2] = dec->frame->data[2];
+	out_frame->linesize[0] = dec->frame->linesize[0];
+	out_frame->linesize[1] = dec->frame->linesize[1];
+	out_frame->linesize[2] = dec->frame->linesize[2];
+	out_frame->width = dec->frame->width;
+	out_frame->height = dec->frame->height;
 	out_frame->pts = dec->frame->pts;
 
 	return true;

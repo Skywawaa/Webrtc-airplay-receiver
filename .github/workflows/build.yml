@@ -1,0 +1,183 @@
+name: Build
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout with submodules
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup MSVC Developer Command Prompt
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Install OpenSSL via Chocolatey
+        run: choco install openssl -y --no-progress
+
+      - name: Download OBS Studio SDK 32.1.1
+        shell: bash
+        run: |
+          curl -L -o deps/obs-sdk.zip \
+            https://github.com/obsproject/obs-studio/archive/refs/tags/32.1.1.zip
+          mkdir -p deps/obs-sdk
+          cd deps/obs-sdk
+          unzip -q ../obs-sdk.zip
+
+      - name: Download FFmpeg 7.1 headers
+        shell: bash
+        run: |
+          curl -L -o deps/ffmpeg7-headers.zip \
+            https://github.com/FFmpeg/FFmpeg/archive/refs/tags/n7.1.1.zip
+          mkdir -p deps/ffmpeg7-include
+          cd deps
+          unzip -q ffmpeg7-headers.zip
+          # Copy just the headers we need
+          for lib in libavcodec libavutil libswscale libswresample; do
+            mkdir -p ffmpeg7-include/$lib
+            cp FFmpeg-n7.1.1/$lib/*.h ffmpeg7-include/$lib/
+          done
+
+      - name: Download libplist 2.7.0
+        shell: bash
+        run: |
+          curl -L -o deps/libplist.zip \
+            https://github.com/libimobiledevice/libplist/releases/download/2.7.0/libplist-2.7.0.tar.bz2
+          # Try release tarball first, fall back to GitHub archive
+          if ! tar -xjf deps/libplist.zip -C deps/ 2>/dev/null; then
+            rm -f deps/libplist.zip
+            curl -L -o deps/libplist.zip \
+              https://github.com/libimobiledevice/libplist/archive/refs/tags/2.7.0.zip
+            cd deps && unzip -q libplist.zip && cd ..
+            # Rename if needed
+            if [ -d deps/libplist-2.7.0 ]; then
+              echo "libplist-2.7.0 directory already exists"
+            elif [ -d deps/libplist-2.7.0 ]; then
+              echo "OK"
+            fi
+          fi
+
+      - name: Create libplist config.h
+        shell: bash
+        run: |
+          cat > deps/libplist-2.7.0/config.h << 'CONFIGEOF'
+          /* Hand-written config.h for building libplist on Windows with MSVC */
+          #pragma once
+          #define PACKAGE_VERSION "2.7.0"
+          #define PACKAGE_NAME "libplist"
+          #define PACKAGE_STRING "libplist 2.7.0"
+          #define HAVE_STRDUP 1
+          #define HAVE_STDINT_H 1
+          #define HAVE_STDLIB_H 1
+          #define HAVE_STRING_H 1
+          #ifdef _MSC_VER
+          #define strcasecmp _stricmp
+          #define strncasecmp _strnicmp
+          #define strdup _strdup
+          #ifndef ssize_t
+          #include <basetsd.h>
+          typedef SSIZE_T ssize_t;
+          #endif
+          #endif
+          CONFIGEOF
+
+      - name: Build libplist
+        run: |
+          cd deps\libplist-2.7.0
+          if exist build rmdir /s /q build
+          mkdir build
+          cd build
+          cmake .. -G "NMake Makefiles" -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=cl
+          nmake
+
+      - name: Generate import libraries (obs.lib, w32-pthreads.lib)
+        run: |
+          lib /def:deps\obs.def /out:deps\obs.lib /machine:x64
+          lib /def:deps\w32-pthreads.def /out:deps\w32-pthreads.lib /machine:x64
+
+      - name: Create stub dnssd.lib
+        shell: bash
+        run: |
+          # UxPlay loads dnssd.dll dynamically via LoadLibrary at runtime,
+          # so we only need a stub .lib to satisfy the linker.
+          if [ -f deps/dnssd.def ]; then
+            lib /def:deps/dnssd.def /out:deps/dnssd.lib /machine:x64 || true
+          else
+            # Create a minimal .def and generate stub lib
+            echo -e "LIBRARY dnssd\nEXPORTS\n    DNSServiceRegister\n    DNSServiceProcessResult\n    DNSServiceRefDeallocate\n    DNSServiceRefSockFD" > deps/dnssd.def
+            lib /def:deps/dnssd.def /out:deps/dnssd.lib /machine:x64
+          fi
+
+      - name: Create FFmpeg stub libs
+        shell: bash
+        run: |
+          # Create minimal stub libs for FFmpeg - the plugin loads these from OBS at runtime
+          mkdir -p deps/obs-ffmpeg-libs
+          for lib in avcodec avutil swscale swresample; do
+            if [ -f deps/${lib}.def ]; then
+              lib /def:deps/${lib}.def /out:deps/obs-ffmpeg-libs/${lib}.lib /machine:x64 || true
+            else
+              echo -e "LIBRARY ${lib}\nEXPORTS\n    dummy_${lib}" > deps/${lib}.def
+              lib /def:deps/${lib}.def /out:deps/obs-ffmpeg-libs/${lib}.lib /machine:x64
+            fi
+          done
+
+      - name: Set OpenSSL path
+        id: openssl
+        shell: bash
+        run: |
+          # Chocolatey installs OpenSSL here
+          OPENSSL_DIR="C:/Program Files/OpenSSL-Win64"
+          if [ ! -d "$OPENSSL_DIR" ]; then
+            OPENSSL_DIR="C:/Program Files/OpenSSL"
+          fi
+          echo "dir=$OPENSSL_DIR" >> "$GITHUB_OUTPUT"
+          echo "OpenSSL dir: $OPENSSL_DIR"
+
+      - name: Build UxPlay libraries
+        run: |
+          cd deps\uxplay-build
+          if exist build rmdir /s /q build
+          mkdir build
+          cd build
+          cmake .. -G "NMake Makefiles" -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=cl -DOPENSSL_DIR="${{ steps.openssl.outputs.dir }}"
+          nmake
+
+      - name: Build plugin
+        run: |
+          if exist build rmdir /s /q build
+          mkdir build
+          cd build
+          cmake .. -G "NMake Makefiles" -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=cl -DOPENSSL_DIR="${{ steps.openssl.outputs.dir }}"
+          nmake
+
+      - name: Prepare release artifact
+        shell: bash
+        run: |
+          mkdir -p artifact
+          cp build/obs-airplay-receiver.dll artifact/
+          # Copy OpenSSL libcrypto DLL
+          OPENSSL_DIR="${{ steps.openssl.outputs.dir }}"
+          if [ -f "$OPENSSL_DIR/bin/libcrypto-3-x64.dll" ]; then
+            cp "$OPENSSL_DIR/bin/libcrypto-3-x64.dll" artifact/
+          elif [ -f "$OPENSSL_DIR/libcrypto-3-x64.dll" ]; then
+            cp "$OPENSSL_DIR/libcrypto-3-x64.dll" artifact/
+          fi
+          cp install.bat artifact/
+          cp uninstall.bat artifact/
+          cp README.md artifact/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: obs-airplay-receiver
+          path: artifact/

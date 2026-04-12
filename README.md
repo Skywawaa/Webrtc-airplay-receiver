@@ -1,148 +1,130 @@
 # OBS AirPlay Receiver
 
-An OBS Studio plugin that receives **AirPlay screen mirroring** from Apple devices (iPhone, iPad, Mac) and displays it as a video source with audio.
+An OBS Studio plugin that receives **AirPlay screen mirroring** from Apple devices (iPhone, iPad, Mac) on Windows and displays it as a video source with synchronized audio.
+
+![Screenshot placeholder](docs/screenshot.png)
 
 ## Features
 
-- **Screen Mirroring** - Receive AirPlay screen mirroring as an OBS source
+- **Screen Mirroring** - Receive AirPlay screen mirroring as a native OBS source
 - **Audio Support** - AAC audio decoded and synced with video
+- **Configurable Resolution** - Set width and height to match your scene layout
+- **Configurable FPS** - Control the maximum frame rate of the mirrored stream
 - **Auto Discovery** - mDNS/Bonjour advertisement so Apple devices find the receiver automatically
-- **Hardware Decoding** - Tries NVIDIA NVDEC, Intel QSV, D3D11VA before falling back to software H.264 decoding
+- **Hardware Decoding** - Tries NVIDIA NVDEC, Intel QSV, and D3D11VA before falling back to software H.264 decoding
 - **Low Latency** - Direct H.264 frame pipeline with minimal buffering
-- **Cross-Platform** - Windows (primary), with Linux/macOS build support
-
-## How It Works
-
-```
-iPhone/iPad/Mac                    OBS Studio
-     |                                |
-     |--- mDNS Discovery ----------->|  (finds "OBS AirPlay Receiver")
-     |--- HTTP /info ---------------->|  (device capabilities exchange)
-     |--- HTTP /pair-setup --------->|  (authentication)
-     |--- HTTP /stream -------------->|  (start mirroring)
-     |                                |
-     |=== H.264 Video Stream =======>|  --> FFmpeg Decode --> OBS Source
-     |=== AAC Audio Stream =========>|  --> FFmpeg Decode --> OBS Audio
-```
 
 ## Requirements
 
-### Runtime
-- OBS Studio 30+ (tested with 32.1.1)
-- Windows 10/11 64-bit
+- **OBS Studio 30+** (tested with 32.1.1)
+- **Windows 10/11 64-bit**
+- **Apple Bonjour** - Required for mDNS discovery so Apple devices can find the receiver. Install [iTunes](https://www.apple.com/itunes/) or the [Bonjour Print Services](https://support.apple.com/kb/DL999) package.
 
-### Build Dependencies
+## Installation
+
+1. Download the latest release `.zip` from the [Releases](../../releases) page
+2. Extract the zip contents
+3. Run `install.bat` as Administrator, or manually copy the files:
+   - `obs-airplay-receiver.dll` to `%PROGRAMDATA%\obs-studio\plugins\obs-airplay-receiver\bin\64bit\`
+   - `libcrypto-3-x64.dll` to the same directory
+4. Restart OBS Studio
+
+To uninstall, run `uninstall.bat` as Administrator or delete the `%PROGRAMDATA%\obs-studio\plugins\obs-airplay-receiver` folder.
+
+## Usage
+
+1. Start OBS Studio
+2. Click **+** under Sources and select **AirPlay Receiver**
+3. Configure the source settings:
+   - **Server Name** - How the receiver appears on Apple devices (default: "OBS AirPlay Receiver")
+   - **Width / Height** - Resolution of the received stream
+   - **Max FPS** - Maximum frame rate
+4. On your Apple device, open **Control Center** > **Screen Mirroring** and select the server name
+5. The mirrored screen appears in OBS with audio
+
+### Firewall
+
+If your Apple device cannot find the receiver, make sure Windows Firewall allows:
+- **TCP port 7000** (AirPlay)
+- **UDP port 5353** (mDNS/Bonjour)
+
+## Building from Source
+
+### Prerequisites
+
+- Visual Studio 2019 or 2022 with C/C++ workload (MSVC compiler)
 - CMake 3.16+
-- Visual Studio 2019+ (or GCC/Clang on Linux/macOS)
-- FFmpeg development libraries (libavcodec, libavutil, libswscale, libswresample)
-- OBS Studio source headers
+- OpenSSL (install via `choco install openssl` or Scoop)
+- Git (for submodules)
 
-## Building
+### Steps
 
-### Windows (Quick Start)
+All commands below should be run from a **VS Developer Command Prompt**.
 
-1. **Clone the repo**
+1. **Clone with submodules**
    ```bash
-   git clone https://github.com/aomkoyo/obs-airplay-receiver.git
+   git clone --recursive https://github.com/aomkoyo/obs-airplay-receiver.git
    cd obs-airplay-receiver
    ```
 
-2. **Get dependencies** (if not already in `deps/`)
-   ```bash
-   # OBS SDK headers
-   curl -L -o deps/obs-sdk.zip https://github.com/obsproject/obs-studio/archive/refs/tags/32.1.1.zip
-   cd deps && unzip obs-sdk.zip -d obs-sdk && cd ..
+2. **Download dependencies** into the `deps/` directory:
+   - **OBS Studio SDK** (32.1.1) - extract to `deps/obs-sdk/obs-studio-32.1.1/`
+     ```bash
+     curl -L -o deps/obs-sdk.zip https://github.com/obsproject/obs-studio/archive/refs/tags/32.1.1.zip
+     cd deps && mkdir obs-sdk && cd obs-sdk && tar -xf ../obs-sdk.zip && cd ..\..
+     ```
+   - **FFmpeg 7.1 headers** - extract to `deps/ffmpeg7-include/`
+   - **libplist 2.7.0** - extract to `deps/libplist-2.7.0/`
 
-   # FFmpeg dev (BtbN builds)
-   curl -L -o deps/ffmpeg.zip https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl-shared.zip
-   cd deps && unzip ffmpeg.zip && cd ..
-
-   # Generate OBS import library (requires VS Developer Command Prompt)
-   # Use pefile: pip install pefile
-   python -c "import pefile; pe=pefile.PE('C:/Program Files/obs-studio/bin/64bit/obs.dll'); f=open('deps/obs.def','w'); f.write('LIBRARY obs\nEXPORTS\n'); [f.write(f'    {e.name.decode()}\n') for e in pe.DIRECTORY_ENTRY_EXPORT.symbols if e.name]"
-   # Then in VS Developer Command Prompt:
-   lib /def:deps/obs.def /out:deps/obs.lib /machine:x64
+3. **Generate import libraries** from OBS DLLs:
+   ```bat
+   lib /def:deps\obs.def /out:deps\obs.lib /machine:x64
+   lib /def:deps\w32-pthreads.def /out:deps\w32-pthreads.lib /machine:x64
+   lib /def:deps\dnssd.def /out:deps\dnssd.lib /machine:x64
    ```
 
-3. **Build**
+4. **Build libplist**
    ```bat
-   :: Open VS Developer Command Prompt, then:
+   cd deps\libplist-2.7.0
+   mkdir build && cd build
+   cmake .. -G "NMake Makefiles" -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=cl
+   nmake
+   cd ..\..\..
+   ```
+
+5. **Build UxPlay libraries** (playfair, llhttp, airplay)
+   ```bat
+   cd deps\uxplay-build
+   mkdir build && cd build
+   cmake .. -G "NMake Makefiles" -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=cl
+   nmake
+   cd ..\..\..
+   ```
+
+6. **Build the plugin**
+   ```bat
    mkdir build && cd build
    cmake .. -G "NMake Makefiles" -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=cl
    nmake
    ```
 
-4. **Install**
-   ```bat
-   :: Copy to OBS plugins directory
-   mkdir "%APPDATA%\obs-studio\plugins\obs-airplay-receiver\bin\64bit"
-   copy build\obs-airplay-receiver.dll "%APPDATA%\obs-studio\plugins\obs-airplay-receiver\bin\64bit\"
-   ```
-
-### Linux
-
-```bash
-sudo apt install cmake build-essential pkg-config libobs-dev \
-  libavcodec-dev libavutil-dev libswscale-dev libswresample-dev
-
-mkdir build && cd build
-cmake .. -DCMAKE_BUILD_TYPE=Release
-make -j$(nproc)
-
-# Install
-mkdir -p ~/.config/obs-studio/plugins/obs-airplay-receiver/bin/64bit
-cp obs-airplay-receiver.so ~/.config/obs-studio/plugins/obs-airplay-receiver/bin/64bit/
-```
-
-## Usage
-
-1. Start OBS Studio
-2. Add a new source: **Sources** > **+** > **AirPlay Receiver**
-3. Configure:
-   - **Server Name** - How the receiver appears on Apple devices (default: "OBS AirPlay Receiver")
-   - **Port** - AirPlay port (default: 7000)
-4. On your Apple device: open Control Center > Screen Mirroring > select "OBS AirPlay Receiver"
-5. The mirrored screen appears in OBS with audio
-
-## Architecture
-
-```
-obs-airplay-receiver/
-├── src/
-│   ├── plugin-main.c              # OBS module entry point
-│   ├── airplay-source.c/h         # OBS source (video + audio output)
-│   ├── audio-decoder.c/h          # AAC → PCM (FFmpeg)
-│   ├── video-decoder.c/h          # H.264 → NV12 (FFmpeg, HW accel)
-│   ├── airplay/
-│   │   ├── airplay-server.c/h     # AirPlay protocol coordinator
-│   │   ├── airplay-mirror.c/h     # Mirror stream receiver (H.264 + AAC)
-│   │   └── airplay-plist.c/h      # Apple plist builder/parser
-│   └── network/
-│       ├── http-server.c/h        # HTTP server for AirPlay control
-│       ├── mdns-publish.c/h       # mDNS/Bonjour service advertisement
-│       └── net-utils.c/h          # Cross-platform socket utilities
-└── CMakeLists.txt
-```
-
-## Known Limitations
-
-- **FairPlay DRM**: Modern iOS (15+) requires FairPlay-SAP authentication for AirPlay screen mirroring. The current implementation has stub FairPlay handlers. For full compatibility, the crypto layer needs proper key exchange (similar to UxPlay/RPiPlay approach).
-- **AirPlay 2**: Partial support. Full AirPlay 2 requires additional protocol features.
-- **One client at a time**: Screen mirroring supports a single connected device.
+7. The output `obs-airplay-receiver.dll` will be in the `build/` directory.
 
 ## Troubleshooting
 
-- **Device doesn't see the receiver**: Check Windows Firewall - allow TCP port 7000 and UDP port 5353 (mDNS)
-- **Black screen after connecting**: May be a FairPlay authentication issue with newer iOS versions
-- **No audio**: Ensure the source's audio monitoring is enabled in OBS mixer
+- **Device doesn't see the receiver** - Check that Bonjour is installed and Windows Firewall allows TCP 7000 and UDP 5353
+- **No audio** - Ensure the source's audio monitoring is enabled in the OBS audio mixer
+- **One client at a time** - AirPlay screen mirroring supports a single connected device
+
+## Credits
+
+This project builds on the work of several open-source projects:
+
+- [UxPlay](https://github.com/antimof/UxPlay) - Open-source AirPlay server (core AirPlay protocol implementation)
+- [mika314/obs-airplay](https://github.com/nickkettner/obs-airplay) - OBS AirPlay plugin inspiration
+- [FFmpeg](https://ffmpeg.org/) - H.264 and AAC decoding
+- [OBS Studio](https://obsproject.com/) - Plugin API
 
 ## License
 
 MIT
-
-## Credits
-
-Built with:
-- [OBS Studio](https://obsproject.com/) plugin API
-- [FFmpeg](https://ffmpeg.org/) for H.264/AAC decoding
-- AirPlay protocol documentation from the open-source community
