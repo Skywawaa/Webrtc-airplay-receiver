@@ -215,7 +215,7 @@ jobs:
           mkdir -p deps/obs-ffmpeg-libs
 
           cat > deps/avcodec.def << 'FFDEF'
-          LIBRARY avcodec
+          LIBRARY avcodec-61
           EXPORTS
               avcodec_find_decoder
               avcodec_find_decoder_by_name
@@ -229,7 +229,7 @@ jobs:
           FFDEF
 
           cat > deps/avutil.def << 'FFDEF'
-          LIBRARY avutil
+          LIBRARY avutil-59
           EXPORTS
               av_frame_alloc
               av_frame_free
@@ -244,7 +244,7 @@ jobs:
           FFDEF
 
           cat > deps/swscale.def << 'FFDEF'
-          LIBRARY swscale
+          LIBRARY swscale-8
           EXPORTS
               sws_getContext
               sws_freeContext
@@ -252,7 +252,7 @@ jobs:
           FFDEF
 
           cat > deps/swresample.def << 'FFDEF'
-          LIBRARY swresample
+          LIBRARY swresample-5
           EXPORTS
               swr_alloc_set_opts2
               swr_init
