@@ -13,7 +13,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Setup MSVC Developer Command Prompt
         uses: ilammy/msvc-dev-cmd@v1
@@ -470,19 +470,23 @@ jobs:
           nmake
 
       - name: Download FFmpeg shared DLLs (for standalone bundle)
-        shell: bash
+        shell: pwsh
         run: |
-          curl -L -o /tmp/ffmpeg-shared.zip \
-            "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n7.1-latest-win64-gpl-shared.zip"
-          cd /tmp && unzip -q ffmpeg-shared.zip
-          FFMPEG_DIR=$(find /tmp -maxdepth 1 -type d -name 'ffmpeg-n7.1*' | head -1)
-          echo "Found FFmpeg dir: $FFMPEG_DIR"
-          mkdir -p ffmpeg-dlls
-          for dll in avcodec avutil avformat swresample; do
-            cp "$FFMPEG_DIR/bin/${dll}-"*.dll ffmpeg-dlls/ 2>/dev/null \
-              || echo "Warning: $dll DLL not found in $FFMPEG_DIR/bin/"
-          done
-          ls -la ffmpeg-dlls/
+          $url = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n7.1-latest-win64-gpl-shared.zip"
+          $dest = "$env:TEMP\ffmpeg-shared.zip"
+          $extractDir = "$env:TEMP\ffmpeg-shared"
+          Invoke-WebRequest -Uri $url -OutFile $dest -MaximumRetryCount 3 -RetryIntervalSec 5
+          Expand-Archive -Path $dest -DestinationPath $extractDir -Force
+          $ffmpegDir = Get-ChildItem -Path $extractDir -Directory | Where-Object { $_.Name -like 'ffmpeg-n7.1*' } | Select-Object -First 1 -ExpandProperty FullName
+          if (-not $ffmpegDir) { $ffmpegDir = $extractDir }
+          Write-Host "Found FFmpeg dir: $ffmpegDir"
+          New-Item -ItemType Directory -Force -Path ffmpeg-dlls | Out-Null
+          foreach ($dll in @('avcodec', 'avutil', 'avformat', 'swresample')) {
+            $found = Get-ChildItem -Path "$ffmpegDir\bin" -Filter "${dll}-*.dll" -ErrorAction SilentlyContinue
+            if ($found) { Copy-Item $found.FullName -Destination ffmpeg-dlls\ }
+            else { Write-Warning "Warning: $dll DLL not found in $ffmpegDir\bin\" }
+          }
+          Get-ChildItem ffmpeg-dlls\
 
       - name: Build standalone airplay-stream.exe
         shell: cmd
@@ -536,7 +540,7 @@ jobs:
           mkdir -p artifact-standalone
           cp build-standalone/standalone/airplay-stream.exe artifact-standalone/
           # FFmpeg DLLs
-          cp /tmp/ffmpeg-dlls/*.dll artifact-standalone/ 2>/dev/null || true
+          cp ffmpeg-dlls/*.dll artifact-standalone/ 2>/dev/null || true
           # OpenSSL DLL
           OPENSSL_DIR="${{ steps.openssl.outputs.dir }}"
           if [ -f "$OPENSSL_DIR/bin/libcrypto-3-x64.dll" ]; then
