@@ -39,11 +39,11 @@ jobs:
           git clone --depth 1 --recurse-submodules \
             https://github.com/mika314/obs-airplay.git deps/mika-obs-airplay
 
-      - name: Download OBS Studio SDK 32.1.1
+      - name: Download OBS Studio SDK 32.1.2
         shell: bash
         run: |
           curl -L -o deps/obs-sdk.zip \
-            "https://github.com/obsproject/obs-studio/archive/refs/tags/32.1.1.zip"
+            "https://github.com/obsproject/obs-studio/archive/refs/tags/32.1.2.zip"
           mkdir -p deps/obs-sdk
           cd deps/obs-sdk
           unzip -q ../obs-sdk.zip
@@ -51,7 +51,7 @@ jobs:
       - name: Create obsconfig.h for OBS SDK
         shell: bash
         run: |
-          cat > deps/obs-sdk/obs-studio-32.1.1/libobs/obsconfig.h << 'EOF'
+          cat > deps/obs-sdk/obs-studio-32.1.2/libobs/obsconfig.h << 'EOF'
           #pragma once
           #define OBS_DATA_PATH "data"
           #define OBS_PLUGIN_PATH "obs-plugins/64bit"
@@ -417,7 +417,7 @@ jobs:
           if(NOT DEFINED OPENSSL_DIR)
               set(OPENSSL_DIR "C:/Program Files/OpenSSL")
           endif()
-          set(W32_PTHREADS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../obs-sdk/obs-studio-32.1.1/deps/w32-pthreads")
+          set(W32_PTHREADS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../obs-sdk/obs-studio-32.1.2/deps/w32-pthreads")
           set(DNSSD_LIB "${CMAKE_CURRENT_SOURCE_DIR}/../dnssd.lib")
           aux_source_directory(${UXPLAY_LIB}/playfair playfair_src)
           add_library(playfair STATIC ${playfair_src})
@@ -489,7 +489,7 @@ jobs:
       - name: Download w32-pthreads.dll from OBS Studio release
         shell: pwsh
         run: |
-          $url = "https://github.com/obsproject/obs-studio/releases/download/32.1.1/OBS-Studio-32.1.1-Windows.zip"
+          $url = "https://github.com/obsproject/obs-studio/releases/download/32.1.2/OBS-Studio-32.1.2-Windows.zip"
           $dest = "$env:TEMP\obs-release.zip"
           $extractDir = "$env:TEMP\obs-release"
           Invoke-WebRequest -Uri $url -OutFile $dest -MaximumRetryCount 3 -RetryIntervalSec 5
