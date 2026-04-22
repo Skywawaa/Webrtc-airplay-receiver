@@ -1,0 +1,169 @@
+/*
+ * main.c — airplay-stream.exe
+ *
+ * Standalone AirPlay receiver that re-streams to a MPEG-TS TCP server.
+ *
+ * Usage:
+ *   airplay-stream [--name <name>] [--port <port>]
+ *                  [--width <w>] [--height <h>] [--fps <fps>]
+ *
+ * Then open in VLC:
+ *   vlc tcp://localhost:8888
+ *   or: Media → Open Network Stream → tcp://localhost:8888
+ *
+ * Press Ctrl+C to stop.
+ */
+
+#include "airplay-stream.h"
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#ifdef _WIN32
+#  define WIN32_LEAN_AND_MEAN
+#  include <windows.h>
+static volatile int g_running = 1;
+static BOOL WINAPI ctrl_handler(DWORD type)
+{
+    (void)type;
+    g_running = 0;
+    return TRUE;
+}
+static void setup_signal(void)
+{
+    SetConsoleCtrlHandler(ctrl_handler, TRUE);
+}
+static void wait_for_exit(void)
+{
+    while (g_running)
+        Sleep(200);
+}
+#else
+#  include <signal.h>
+#  include <unistd.h>
+static volatile int g_running = 1;
+static void sig_handler(int sig) { (void)sig; g_running = 0; }
+static void setup_signal(void)
+{
+    signal(SIGINT,  sig_handler);
+    signal(SIGTERM, sig_handler);
+}
+static void wait_for_exit(void)
+{
+    while (g_running)
+        usleep(200000);
+}
+#endif
+
+/* ------------------------------------------------------------------ */
+/* Argument parsing                                                     */
+/* ------------------------------------------------------------------ */
+
+static void print_usage(const char *prog)
+{
+    fprintf(stdout,
+        "Usage: %s [options]\n"
+        "\n"
+        "Options:\n"
+        "  --name  <name>   AirPlay server name shown on Apple devices\n"
+        "                   (default: \"AirPlay Stream\")\n"
+        "  --port  <port>   TCP port for the MPEG-TS output stream\n"
+        "                   (default: 8888)\n"
+        "  --width  <px>    Requested video width  (default: device native)\n"
+        "  --height <px>    Requested video height (default: device native)\n"
+        "  --fps    <fps>   Requested frame rate   (default: 60)\n"
+        "  --help           Show this help message\n"
+        "\n"
+        "Open the stream in VLC:\n"
+        "  vlc tcp://localhost:<port>\n"
+        "  or: Media → Open Network Stream → tcp://localhost:<port>\n",
+        prog);
+}
+
+static int parse_args(int argc, char **argv,
+                      struct airplay_stream_config *cfg)
+{
+    /* Defaults */
+    strncpy(cfg->server_name, "AirPlay Stream",
+            sizeof(cfg->server_name) - 1);
+    cfg->stream_port = 8888;
+    cfg->width       = 0;   /* device native */
+    cfg->height      = 0;
+    cfg->fps         = 60;
+
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--help") == 0 ||
+            strcmp(argv[i], "-h") == 0) {
+            print_usage(argv[0]);
+            return -1;
+        }
+        if (strcmp(argv[i], "--name") == 0 && i + 1 < argc) {
+            strncpy(cfg->server_name, argv[++i],
+                    sizeof(cfg->server_name) - 1);
+        } else if (strcmp(argv[i], "--port") == 0 && i + 1 < argc) {
+            cfg->stream_port = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--width") == 0 && i + 1 < argc) {
+            cfg->width = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--height") == 0 && i + 1 < argc) {
+            cfg->height = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--fps") == 0 && i + 1 < argc) {
+            cfg->fps = atoi(argv[++i]);
+        } else {
+            fprintf(stderr, "Unknown option: %s\n", argv[i]);
+            print_usage(argv[0]);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* main                                                                 */
+/* ------------------------------------------------------------------ */
+
+int main(int argc, char **argv)
+{
+    struct airplay_stream_config cfg;
+    int rc = parse_args(argc, argv, &cfg);
+    if (rc != 0)
+        return (rc < 0) ? 0 : rc; /* -1 = --help (success), >0 = error */
+
+    setup_signal();
+
+    char res_str[32];
+    if (cfg.width > 0 && cfg.height > 0)
+        snprintf(res_str, sizeof(res_str), "%dx%d", cfg.width, cfg.height);
+    else
+        snprintf(res_str, sizeof(res_str), "device native");
+
+    fprintf(stdout,
+            "airplay-stream — AirPlay to MPEG-TS TCP streamer\n"
+            "-------------------------------------------------\n"
+            "Server name : %s\n"
+            "Stream port : %d\n"
+            "Resolution  : %s\n"
+            "FPS         : %d\n\n",
+            cfg.server_name,
+            cfg.stream_port,
+            res_str,
+            cfg.fps);
+
+    if (!airplay_stream_start(&cfg)) {
+        fprintf(stderr, "Failed to start AirPlay stream server.\n");
+        return 1;
+    }
+
+    fprintf(stdout,
+            "\nReady.  Open in VLC:\n"
+            "  vlc tcp://localhost:%d\n"
+            "  (or: Media → Open Network Stream → "
+            "tcp://localhost:%d)\n\n"
+            "Press Ctrl+C to stop.\n\n",
+            cfg.stream_port, cfg.stream_port);
+
+    wait_for_exit();
+
+    airplay_stream_stop();
+    return 0;
+}

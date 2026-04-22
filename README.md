@@ -4,11 +4,18 @@
 [![License: LGPL v2.1](https://img.shields.io/badge/License-LGPL_v2.1-blue.svg)](LICENSE)
 [![Release](https://img.shields.io/github/v/release/aomkoyo/obs-airplay-receiver)](https://github.com/aomkoyo/obs-airplay-receiver/releases)
 
-An OBS Studio plugin that receives **AirPlay screen mirroring** from Apple devices (iPhone, iPad, Mac) on Windows and displays it as a video source with synchronized audio.
+This repository contains two tools built on the same UxPlay AirPlay 2 library:
+
+1. **OBS Plugin** (`obs-airplay-receiver.dll`) — receives AirPlay screen mirroring and displays it as an OBS Studio source.
+2. **Standalone Streamer** (`airplay-stream.exe`) — receives AirPlay screen mirroring and re-streams it as MPEG-TS over TCP so you can open it directly in **VLC** or any media player, without OBS.
 
 > **Built entirely with [Claude Code](https://claude.ai/code)** (Anthropic's AI coding agent) — from protocol implementation to CI/CD pipeline. This project is a Windows port of [mika314/obs-airplay](https://github.com/mika314/obs-airplay), using [UxPlay](https://github.com/FDH2/UxPlay)'s battle-tested AirPlay 2 protocol library.
 
-## Features
+---
+
+## OBS Plugin
+
+### Features
 
 - **Screen Mirroring** - Receive AirPlay screen mirroring as a native OBS source
 - **Audio Support** - AAC audio decoded and synced with video
@@ -18,13 +25,13 @@ An OBS Studio plugin that receives **AirPlay screen mirroring** from Apple devic
 - **Hardware Decoding** - Tries NVIDIA NVDEC, Intel QSV, and D3D11VA before falling back to software H.264 decoding
 - **Low Latency** - Direct H.264 frame pipeline with minimal buffering
 
-## Requirements
+### Requirements
 
 - **OBS Studio 30+** (tested with 32.1.1)
 - **Windows 10/11 64-bit**
 - **Apple Bonjour** - Required for mDNS discovery so Apple devices can find the receiver. Install [iTunes](https://www.apple.com/itunes/) or the [Bonjour Print Services](https://support.apple.com/kb/DL999) package.
 
-## Installation
+### Installation
 
 1. Download the latest release `.zip` from the [Releases](../../releases) page
 2. Extract the zip contents
@@ -35,7 +42,7 @@ An OBS Studio plugin that receives **AirPlay screen mirroring** from Apple devic
 
 To uninstall, run `uninstall.bat` as Administrator or delete the `%PROGRAMDATA%\obs-studio\plugins\obs-airplay-receiver` folder.
 
-## Usage
+### Usage
 
 1. Start OBS Studio
 2. Click **+** under Sources and select **AirPlay Receiver**
@@ -46,7 +53,62 @@ To uninstall, run `uninstall.bat` as Administrator or delete the `%PROGRAMDATA%\
 4. On your Apple device, open **Control Center** > **Screen Mirroring** and select the server name
 5. The mirrored screen appears in OBS with audio
 
-### Firewall
+---
+
+## Standalone Streamer (`airplay-stream.exe`)
+
+**No OBS required.** `airplay-stream.exe` is a command-line tool that:
+
+- Advertises itself on the local network via mDNS/Bonjour (same as the plugin)
+- Accepts an AirPlay screen-mirroring connection from any Apple device
+- Re-streams the content as **MPEG-TS over TCP** so you can open it in VLC or any compatible player
+
+### How it works
+
+```
+iPhone/iPad/Mac  ──(AirPlay)──►  airplay-stream.exe  ──(TCP MPEG-TS)──►  VLC / mpv / ffplay
+```
+
+- **Video**: H.264 frames are passed directly into the MPEG-TS container (no decode/re-encode — low CPU, no quality loss).
+- **Audio**: AAC-ELD audio is decoded and re-encoded as AAC-LC for maximum player compatibility.
+
+### Usage
+
+```bat
+airplay-stream.exe [options]
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `--name <name>` | `AirPlay Stream` | Server name shown on Apple device |
+| `--port <port>` | `8888` | TCP port for the MPEG-TS stream |
+| `--width <px>` | device native | Requested video width |
+| `--height <px>` | device native | Requested video height |
+| `--fps <fps>` | `60` | Requested frame rate |
+| `--help` | | Show help and exit |
+
+**Example:**
+
+```bat
+airplay-stream.exe --name "My Stream" --port 8888
+```
+
+Then open in VLC:
+- Command line: `vlc tcp://localhost:8888`
+- GUI: **Media → Open Network Stream** → `tcp://localhost:8888`
+
+Or with FFplay: `ffplay tcp://localhost:8888`
+
+### Standalone Streamer — Firewall
+
+Allow the following through Windows Firewall:
+- **TCP port 7000** (AirPlay)
+- **TCP port `<stream-port>`** (MPEG-TS output, default 8888)
+- **UDP port 5353** (mDNS/Bonjour)
+
+---
+
+### OBS Plugin — Firewall
 
 If your Apple device cannot find the receiver, make sure Windows Firewall allows:
 - **TCP port 7000** (AirPlay)
@@ -105,19 +167,29 @@ All commands below should be run from a **VS Developer Command Prompt**.
    cd ..\..\..
    ```
 
-6. **Build the plugin**
+6. **Build the plugin** (and optionally the standalone streamer)
    ```bat
    mkdir build && cd build
    cmake .. -G "NMake Makefiles" -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=cl
    nmake
    ```
 
-7. The output `obs-airplay-receiver.dll` will be in the `build/` directory.
+   To also build `airplay-stream.exe`, add `-DBUILD_STANDALONE=ON`:
+   ```bat
+   cmake .. -G "NMake Makefiles" -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=cl -DBUILD_STANDALONE=ON
+   nmake
+   ```
+
+7. Output files in the `build/` directory:
+   - `obs-airplay-receiver.dll` — OBS plugin
+   - `standalone/airplay-stream.exe` — standalone streamer (if `BUILD_STANDALONE=ON`)
 
 ## Troubleshooting
 
 - **Device doesn't see the receiver** - Check that Bonjour is installed and Windows Firewall allows TCP 7000 and UDP 5353
-- **No audio** - Ensure the source's audio monitoring is enabled in the OBS audio mixer
+- **No audio (OBS plugin)** - Ensure the source's audio monitoring is enabled in the OBS audio mixer
+- **No audio (standalone)** - VLC sometimes needs a moment to buffer; try pausing and unpausing
+- **VLC can't connect** - Check that Windows Firewall allows the stream port (default TCP 8888); try `telnet localhost 8888`
 - **One client at a time** - AirPlay screen mirroring supports a single connected device
 
 ## Built with Claude Code
