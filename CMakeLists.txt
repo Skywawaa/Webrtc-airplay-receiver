@@ -1,6 +1,10 @@
 cmake_minimum_required(VERSION 3.16)
 project(obs-airplay-receiver VERSION 2.0.1 LANGUAGES C)
 
+# Build the standalone airplay-stream.exe in addition to the OBS plugin.
+# Pass -DBUILD_STANDALONE=ON to cmake to enable.
+option(BUILD_STANDALONE "Build the standalone airplay-stream executable" OFF)
+
 # --- Paths ---
 set(DEPS_DIR "${CMAKE_SOURCE_DIR}/deps")
 
@@ -115,3 +119,8 @@ set_target_properties(obs-airplay-receiver PROPERTIES
 # Install
 set(OBS_PLUGIN_DEST "$ENV{PROGRAMDATA}/obs-studio/plugins/obs-airplay-receiver/bin/64bit")
 install(TARGETS obs-airplay-receiver DESTINATION ${OBS_PLUGIN_DEST})
+
+# Standalone airplay-stream.exe (optional)
+if(BUILD_STANDALONE)
+    add_subdirectory(standalone)
+endif()
