@@ -3,6 +3,7 @@ name: Build
 on:
   push:
     branches: [master]
+    tags: ['v*']
   pull_request:
     branches: [master]
 
@@ -61,7 +62,7 @@ jobs:
           cd deps
           unzip -q ffmpeg7-headers.zip
           mkdir -p ffmpeg7-include
-          for lib in libavcodec libavutil libswscale libswresample; do
+          for lib in libavcodec libavutil libswscale libswresample libavformat; do
             mkdir -p ffmpeg7-include/$lib
             cp FFmpeg-n7.1.1/$lib/*.h ffmpeg7-include/$lib/
           done
@@ -260,13 +261,33 @@ jobs:
               swr_convert
           FFDEF
 
+          cat > deps/avformat.def << 'FFDEF'
+          LIBRARY avformat-61
+          EXPORTS
+              avformat_open_input
+              avformat_close_input
+              avformat_new_stream
+              avformat_write_header
+              av_write_frame
+              av_interleaved_write_frame
+              av_write_trailer
+              avformat_alloc_output_context2
+              avio_open
+              avio_closep
+              avformat_free_context
+              av_guess_format
+              avformat_network_init
+              avformat_network_deinit
+              av_dump_format
+          FFDEF
+
       - name: Generate import libraries from def files
         shell: cmd
         run: |
           lib /def:deps\obs.def /out:deps\obs.lib /machine:x64
           lib /def:deps\w32-pthreads.def /out:deps\w32-pthreads.lib /machine:x64
           lib /def:deps\dnssd.def /out:deps\dnssd.lib /machine:x64
-          for %%f in (avcodec avutil swscale swresample) do (
+          for %%f in (avcodec avutil swscale swresample avformat) do (
             lib /def:deps\%%f.def /out:deps\obs-ffmpeg-libs\%%f.lib /machine:x64
           )
 
@@ -448,6 +469,32 @@ jobs:
           cmake .. -G "NMake Makefiles" -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=cl -DOPENSSL_DIR="${{ steps.openssl.outputs.dir }}"
           nmake
 
+      - name: Download FFmpeg shared DLLs (for standalone bundle)
+        shell: bash
+        run: |
+          curl -L -o /tmp/ffmpeg-shared.zip \
+            "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n7.1-latest-win64-gpl-shared.zip"
+          cd /tmp && unzip -q ffmpeg-shared.zip
+          FFMPEG_DIR=$(find /tmp -maxdepth 1 -type d -name 'ffmpeg-n7.1*' | head -1)
+          echo "Found FFmpeg dir: $FFMPEG_DIR"
+          mkdir -p ffmpeg-dlls
+          for dll in avcodec avutil avformat swresample; do
+            cp "$FFMPEG_DIR/bin/${dll}-"*.dll ffmpeg-dlls/ 2>/dev/null \
+              || echo "Warning: $dll DLL not found in $FFMPEG_DIR/bin/"
+          done
+          ls -la ffmpeg-dlls/
+
+      - name: Build standalone airplay-stream.exe
+        shell: cmd
+        run: |
+          if exist build-standalone rmdir /s /q build-standalone
+          mkdir build-standalone
+          cd build-standalone
+          cmake .. -G "NMake Makefiles" -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=cl ^
+              -DBUILD_OBS_PLUGIN=OFF -DBUILD_STANDALONE=ON ^
+              -DOPENSSL_DIR="${{ steps.openssl.outputs.dir }}"
+          nmake
+
       - name: Prepare release artifact
         shell: bash
         run: |
@@ -482,3 +529,109 @@ jobs:
         with:
           name: obs-airplay-receiver-installer
           path: OBS-AirPlay-Receiver-Setup-*.exe
+
+      - name: Prepare standalone artifact
+        shell: bash
+        run: |
+          mkdir -p artifact-standalone
+          cp build-standalone/standalone/airplay-stream.exe artifact-standalone/
+          # FFmpeg DLLs
+          cp /tmp/ffmpeg-dlls/*.dll artifact-standalone/ 2>/dev/null || true
+          # OpenSSL DLL
+          OPENSSL_DIR="${{ steps.openssl.outputs.dir }}"
+          if [ -f "$OPENSSL_DIR/bin/libcrypto-3-x64.dll" ]; then
+            cp "$OPENSSL_DIR/bin/libcrypto-3-x64.dll" artifact-standalone/
+          elif [ -f "$OPENSSL_DIR/libcrypto-3-x64.dll" ]; then
+            cp "$OPENSSL_DIR/libcrypto-3-x64.dll" artifact-standalone/
+          fi
+          cp README.md artifact-standalone/
+          cat > artifact-standalone/README-STANDALONE.txt << 'EOF'
+          airplay-stream.exe — Standalone AirPlay to MPEG-TS TCP streamer
+          =================================================================
+
+          INCLUDED FILES
+          --------------
+          airplay-stream.exe       — The standalone AirPlay receiver
+          avcodec-61.dll           — FFmpeg (LGPL/GPL)
+          avutil-59.dll            — FFmpeg
+          avformat-61.dll          — FFmpeg
+          swresample-5.dll         — FFmpeg
+          libcrypto-3-x64.dll      — OpenSSL
+
+          ADDITIONAL REQUIREMENTS (not bundled for licensing reasons)
+          -----------------------------------------------------------
+          1. dnssd.dll — Apple Bonjour / mDNS
+             Install via:
+               • iTunes for Windows (free from microsoft.com/en-us/p/itunes)
+               • Bonjour Print Services for Windows:
+                 https://support.apple.com/kb/DL999
+             Once installed, dnssd.dll will be in your system PATH.
+
+          2. w32-pthreads.dll — POSIX Threads for Windows
+             This DLL ships with OBS Studio.
+             If you have OBS installed, it is already in your system.
+             Alternatively, copy w32-pthreads.dll from your OBS installation
+             (e.g. C:\Program Files\obs-studio\bin\64bit\) next to
+             airplay-stream.exe.
+
+          USAGE
+          -----
+          airplay-stream.exe [--name "My Stream"] [--port 8888]
+          airplay-stream.exe --hw-accel
+          airplay-stream.exe --help
+
+          Then open the stream in VLC:
+            vlc tcp://localhost:8888
+          EOF
+          ls -la artifact-standalone/
+
+      - name: Upload standalone artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: airplay-stream-standalone
+          path: artifact-standalone/
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download OBS plugin artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: obs-airplay-receiver
+          path: obs-plugin/
+
+      - name: Download OBS plugin installer
+        uses: actions/download-artifact@v4
+        with:
+          name: obs-airplay-receiver-installer
+          path: installer/
+
+      - name: Download standalone artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: airplay-stream-standalone
+          path: standalone/
+
+      - name: Create release archives
+        run: |
+          cd obs-plugin
+          zip -r ../obs-airplay-receiver-${{ github.ref_name }}.zip .
+          cd ../standalone
+          zip -r ../airplay-stream-standalone-${{ github.ref_name }}.zip .
+          cd ..
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "OBS AirPlay Receiver ${{ github.ref_name }}"
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          files: |
+            obs-airplay-receiver-${{ github.ref_name }}.zip
+            installer/OBS-AirPlay-Receiver-Setup-*.exe
+            airplay-stream-standalone-${{ github.ref_name }}.zip
