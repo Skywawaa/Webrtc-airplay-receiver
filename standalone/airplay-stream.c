@@ -13,6 +13,7 @@
 
 #include "airplay-stream.h"
 #include "ts-output.h"
+#include "webrtc-output.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -61,7 +62,8 @@ struct audio_dec {
 struct airplay_ctx {
     raop_t          *raop;
     dnssd_t         *dnssd;
-    struct ts_output *ts;
+    struct ts_output    *ts;
+    struct webrtc_output *webrtc;
     struct audio_dec adec;
     int              open_connections;
 };
@@ -276,6 +278,10 @@ static void cb_video_process(void *cls, raop_ntp_t *ntp,
     ts_output_write_video(ctx->ts,
                           data->data, (size_t)data->data_len,
                           (int64_t)data->pts);
+    if (ctx->webrtc)
+        webrtc_output_write_video(ctx->webrtc,
+                                  data->data, (size_t)data->data_len,
+                                  (int64_t)data->pts);
 }
 
 static void cb_audio_process(void *cls, raop_ntp_t *ntp,
@@ -295,6 +301,10 @@ static void cb_audio_process(void *cls, raop_ntp_t *ntp,
     ts_output_write_audio(ctx->ts, pcm, samps, ch,
                           ctx->adec.ctx->sample_rate,
                           (int64_t)data->ntp_time);
+    if (ctx->webrtc)
+        webrtc_output_write_audio(ctx->webrtc, pcm, samps, ch,
+                                  ctx->adec.ctx->sample_rate,
+                                  (int64_t)data->ntp_time);
 }
 
 static void cb_audio_flush(void *cls)    { (void)cls; }
@@ -361,6 +371,15 @@ bool airplay_stream_start(const struct airplay_stream_config *cfg)
         adec_destroy(&ctx->adec);
         free(ctx);
         return false;
+    }
+
+    /* Create WebRTC output (optional — only when webrtc_port > 0) */
+    if (cfg->webrtc_port > 0) {
+        ctx->webrtc = webrtc_output_create(cfg->webrtc_port);
+        if (!ctx->webrtc)
+            fprintf(stderr,
+                    "[AirPlay] Warning: WebRTC output failed to start on port %d\n",
+                    cfg->webrtc_port);
     }
 
     /* Set up UxPlay callbacks */
@@ -449,6 +468,7 @@ fail:
     if (ctx->raop)  raop_destroy(ctx->raop);
     if (ctx->dnssd) dnssd_destroy(ctx->dnssd);
     ts_output_destroy(ctx->ts);
+    if (ctx->webrtc) webrtc_output_destroy(ctx->webrtc);
     adec_destroy(&ctx->adec);
     free(ctx);
     return false;
@@ -473,6 +493,8 @@ void airplay_stream_stop(void)
     }
 
     ts_output_destroy(ctx->ts);
+    if (ctx->webrtc)
+        webrtc_output_destroy(ctx->webrtc);
     adec_destroy(&ctx->adec);
     free(ctx);
 
