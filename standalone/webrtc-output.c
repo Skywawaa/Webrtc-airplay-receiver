@@ -1278,6 +1278,15 @@ void webrtc_output_write_video(struct webrtc_output *out,
     mutex_unlock(&out->lock);
 }
 
+void webrtc_output_request_keyframe(struct webrtc_output *out)
+{
+    if (!out) return;
+    mutex_lock(&out->lock);
+    if (out->pc_open)
+        out->needs_keyframe = true;
+    mutex_unlock(&out->lock);
+}
+
 void webrtc_output_write_audio(struct webrtc_output *out,
                                const float *pcm, int samples,
                                int channels, int sample_rate,

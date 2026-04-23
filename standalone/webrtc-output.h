@@ -63,3 +63,14 @@ void webrtc_output_write_audio(struct webrtc_output *out,
                                const float *pcm, int samples,
                                int channels, int sample_rate,
                                int64_t pts_us);
+
+/*
+ * Request that a cached IDR keyframe be injected before the next video
+ * frame delivered to the browser.  Call this whenever the AirPlay session
+ * restarts (device reconnects) so the browser H.264 decoder can sync to
+ * the new stream even when the first incoming frame is not an IDR.
+ *
+ * Safe to call at any time; has no effect if no peer is connected or if
+ * no keyframe has been cached yet.
+ */
+void webrtc_output_request_keyframe(struct webrtc_output *out);

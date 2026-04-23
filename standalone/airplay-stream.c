@@ -243,6 +243,11 @@ static void cb_conn_init(void *cls)
     ctx->open_connections++;
     fprintf(stdout, "[AirPlay] Device connected (open: %d)\n",
             ctx->open_connections);
+    /* A new AirPlay session is starting.  The browser's H.264 decoder needs a
+     * keyframe to sync to the fresh stream; request one so the cached IDR is
+     * re-injected before the first P-frame if the device doesn't open with one. */
+    if (ctx->open_connections == 1)
+        webrtc_output_request_keyframe(ctx->webrtc);
 }
 
 static void cb_conn_destroy(void *cls)
