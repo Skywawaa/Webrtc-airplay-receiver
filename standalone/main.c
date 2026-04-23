@@ -70,6 +70,11 @@ static void print_usage(const char *prog)
         "                   (default: \"AirPlay Stream\")\n"
         "  --port  <port>   TCP port for the MPEG-TS output stream\n"
         "                   (default: 8888)\n"
+        "  --webrtc-port <port>\n"
+        "                   HTTP port for the WebRTC signalling server\n"
+        "                   (default: disabled). Open http://localhost:<port>/\n"
+        "                   in any modern browser for < 100 ms latency.\n"
+        "                   Runs alongside the MPEG-TS output.\n"
         "  --width  <px>    Requested video width  (default: device native)\n"
         "  --height <px>    Requested video height (default: device native)\n"
         "  --fps    <fps>   Requested frame rate   (default: 60)\n"
@@ -78,9 +83,10 @@ static void print_usage(const char *prog)
         "                    falls back to software if unavailable)\n"
         "  --help           Show this help message\n"
         "\n"
-        "Open the stream in VLC:\n"
-        "  vlc tcp://localhost:<port>\n"
-        "  or: Media → Open Network Stream → tcp://localhost:<port>\n",
+        "Stream destinations:\n"
+        "  MPEG-TS (VLC):  vlc tcp://localhost:<port>\n"
+        "                  or: Media → Open Network Stream → tcp://localhost:<port>\n"
+        "  WebRTC browser: http://localhost:<webrtc-port>/\n",
         prog);
 }
 
@@ -95,6 +101,7 @@ static int parse_args(int argc, char **argv,
     cfg->height      = 0;
     cfg->fps         = 60;
     cfg->hw_accel    = false;
+    cfg->webrtc_port = 0;   /* disabled */
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--help") == 0 ||
@@ -107,6 +114,8 @@ static int parse_args(int argc, char **argv,
                     sizeof(cfg->server_name) - 1);
         } else if (strcmp(argv[i], "--port") == 0 && i + 1 < argc) {
             cfg->stream_port = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--webrtc-port") == 0 && i + 1 < argc) {
+            cfg->webrtc_port = atoi(argv[++i]);
         } else if (strcmp(argv[i], "--width") == 0 && i + 1 < argc) {
             cfg->width = atoi(argv[++i]);
         } else if (strcmp(argv[i], "--height") == 0 && i + 1 < argc) {
@@ -143,16 +152,25 @@ int main(int argc, char **argv)
     else
         snprintf(res_str, sizeof(res_str), "device native");
 
+    char webrtc_str[32];
+    if (cfg.webrtc_port > 0)
+        snprintf(webrtc_str, sizeof(webrtc_str), "%d  (browser player)",
+                 cfg.webrtc_port);
+    else
+        snprintf(webrtc_str, sizeof(webrtc_str), "disabled");
+
     fprintf(stdout,
-            "airplay-stream — AirPlay to MPEG-TS TCP streamer\n"
-            "-------------------------------------------------\n"
+            "airplay-stream — AirPlay to MPEG-TS / WebRTC streamer\n"
+            "------------------------------------------------------\n"
             "Server name : %s\n"
-            "Stream port : %d\n"
+            "Stream port : %d  (MPEG-TS, open with VLC)\n"
+            "WebRTC port : %s\n"
             "Resolution  : %s\n"
             "FPS         : %d\n"
             "HW accel    : %s\n\n",
             cfg.server_name,
             cfg.stream_port,
+            webrtc_str,
             res_str,
             cfg.fps,
             cfg.hw_accel ? "enabled (aac_mf)" : "disabled (software)");
@@ -169,6 +187,12 @@ int main(int argc, char **argv)
             "tcp://localhost:%d)\n\n"
             "Press Ctrl+C to stop.\n\n",
             cfg.stream_port, cfg.stream_port);
+
+    if (cfg.webrtc_port > 0)
+        fprintf(stdout,
+                "WebRTC player (< 100 ms latency):\n"
+                "  http://localhost:%d/\n\n",
+                cfg.webrtc_port);
 
     wait_for_exit();
 

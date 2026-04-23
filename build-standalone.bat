@@ -22,12 +22,21 @@ REM        scoop install openssl
 REM   7. deps\w32-pthreads.lib + w32-pthreads headers
 REM      (from the OBS SDK or installed separately)
 REM   8. deps\dnssd.lib  — Apple Bonjour SDK import lib
+REM   9. deps\libdatachannel\  — libdatachannel (WebRTC)
+REM      Download a prebuilt release from:
+REM        https://github.com/paullouisageneau/libdatachannel/releases
+REM      Extract so that:
+REM        deps\libdatachannel\include\rtc\rtc.h
+REM        deps\libdatachannel\lib\datachannel.lib
+REM        deps\libdatachannel\bin\datachannel.dll
+REM      Copy datachannel.dll next to airplay-stream.exe at runtime.
 REM
 REM Optional overrides (set before calling this script):
 REM   set OPENSSL_DIR=C:\path\to\openssl
 REM   set FFMPEG_LIB_DIR=C:\path\to\ffmpeg-libs
 REM   set FFMPEG_INCLUDE_DIR=C:\path\to\ffmpeg-include
 REM   set W32_PTHREADS_DIR=C:\path\to\w32-pthreads-headers
+REM   set LIBDATACHANNEL_DIR=C:\path\to\libdatachannel
 REM ============================================================
 
 setlocal
@@ -64,6 +73,14 @@ if defined W32_PTHREADS_DIR (
     set W32_PT_CMAKE=
 )
 
+REM --- libdatachannel (optional override) ---
+if defined LIBDATACHANNEL_DIR (
+    echo Using LIBDATACHANNEL_DIR: %LIBDATACHANNEL_DIR%
+    set LIBDC_CMAKE=-DLIBDATACHANNEL_DIR="%LIBDATACHANNEL_DIR%"
+) else (
+    set LIBDC_CMAKE=
+)
+
 REM --- Create build directory ---
 if not exist build-standalone mkdir build-standalone
 cd build-standalone
@@ -79,7 +96,8 @@ cmake .. -G "NMake Makefiles" ^
     %OPENSSL_CMAKE% ^
     %FFMPEG_LIB_CMAKE% ^
     %FFMPEG_INC_CMAKE% ^
-    %W32_PT_CMAKE%
+    %W32_PT_CMAKE% ^
+    %LIBDC_CMAKE%
 
 if errorlevel 1 (
     echo.
@@ -110,10 +128,11 @@ echo.
 echo Copy the following DLLs next to airplay-stream.exe:
 echo   avformat-*.dll avcodec-*.dll avutil-*.dll swresample-*.dll
 echo   libcrypto-3-x64.dll (OpenSSL 3.0-3.3) OR libcrypto-4-x64.dll (OpenSSL 3.4+)
-echo   dnssd.dll  w32-pthreads.dll
+echo   dnssd.dll  w32-pthreads.dll  datachannel.dll
 echo.
 echo Usage:
 echo   airplay-stream.exe [--name "My Stream"] [--port 8888]
-echo   airplay-stream.exe --hw-accel   (hardware audio codec)
+echo   airplay-stream.exe --webrtc-port 8889   (WebRTC ^<100ms player)
+echo   airplay-stream.exe --hw-accel           (hardware audio codec)
 echo   airplay-stream.exe --help
 echo ============================================================

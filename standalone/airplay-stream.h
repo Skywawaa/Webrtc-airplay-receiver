@@ -28,6 +28,15 @@ struct airplay_stream_config {
      * hardware codec is unavailable.  Default: false.
      */
     bool hw_accel;
+
+    /*
+     * TCP port for the WebRTC HTTP signalling server (e.g. 8889).
+     * When > 0, a WebRTC output is started in parallel with (or instead
+     * of) the MPEG-TS output.  Navigate to http://localhost:<webrtc_port>/
+     * in any modern browser for < 100 ms end-to-end latency.
+     * 0 = disabled (default).
+     */
+    int webrtc_port;
 };
 
 /*
