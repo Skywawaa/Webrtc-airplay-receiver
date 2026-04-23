@@ -529,23 +529,26 @@ jobs:
       - name: Download and build libdatachannel
         shell: cmd
         run: |
-          REM Capture repo root before changing directories
+          REM Capture absolute paths before any directory changes
+          set LIBDC_ROOT=%CD%
+          set LIBDC_SRC=%CD%\deps\libdatachannel-src
           set LIBDC_INSTALL=%CD%\deps\libdatachannel
           git clone --depth 1 --recurse-submodules --branch v0.24.2 ^
-            https://github.com/paullouisageneau/libdatachannel.git deps\libdatachannel-src
+            https://github.com/paullouisageneau/libdatachannel.git "%LIBDC_SRC%"
           if errorlevel 1 exit /b 1
-          cd deps\libdatachannel-src
-          cmake -B build -G "NMake Makefiles" ^
+          cmake -S "%LIBDC_SRC%" -B "%LIBDC_SRC%\build" -G "NMake Makefiles" ^
               -DCMAKE_BUILD_TYPE=Release ^
               -DUSE_GNUTLS=0 ^
               "-DCMAKE_INSTALL_PREFIX=%LIBDC_INSTALL%"
           if errorlevel 1 exit /b 1
-          cd build
+          cd /d "%LIBDC_SRC%\build"
           nmake
           if errorlevel 1 exit /b 1
-          cd ..
-          cmake --install build
+          cmake --install "%LIBDC_SRC%\build"
           if errorlevel 1 exit /b 1
+          REM Clean up source tree to save disk space
+          cd /d "%LIBDC_ROOT%"
+          rmdir /s /q "%LIBDC_SRC%"
 
       - name: Build standalone airplay-stream.exe
         shell: cmd
