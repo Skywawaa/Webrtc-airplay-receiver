@@ -236,6 +236,7 @@ jobs:
               avcodec_send_frame
               avcodec_receive_packet
               avcodec_parameters_from_context
+              avcodec_flush_buffers
               av_packet_alloc
               av_packet_free
               av_packet_unref
