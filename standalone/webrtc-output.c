@@ -24,6 +24,10 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <time.h>
+#ifdef _WIN32
+/* BCryptGenRandom (fallback SSRC entropy) */
+#  include <bcrypt.h>
+#endif
 
 /* ------------------------------------------------------------------ */
 /* Platform abstractions                                                */
@@ -254,8 +258,26 @@ static const char HTML_PLAYER[] =
 "</body>\n"
 "</html>\n";
 
-/* ------------------------------------------------------------------ */
-/* Main state structure (forward-declared so helpers can reference it) */
+/*
+ * Fill buf with size bytes of cryptographically secure random data.
+ * Primary: OpenSSL RAND_bytes.
+ * Fallback: BCryptGenRandom (Windows) or /dev/urandom (POSIX).
+ */
+static void secure_random(unsigned char *buf, size_t size)
+{
+    if (RAND_bytes(buf, (int)size) == 1)
+        return;
+
+#ifdef _WIN32
+    BCryptGenRandom(NULL, buf, (ULONG)size, BCRYPT_USE_SYSTEM_PREFERRED_RNG);
+#else
+    FILE *f = fopen("/dev/urandom", "rb");
+    if (f) {
+        (void)fread(buf, 1, size, f);
+        fclose(f);
+    }
+#endif
+}
 /* ------------------------------------------------------------------ */
 
 struct webrtc_output {
@@ -410,9 +432,12 @@ static void rtp_send_h264(struct webrtc_output *out,
     if (!out->pc_open || out->video_tr < 0) return;
 
     /* Locate start codes and record the offset of the first NAL byte
-     * (i.e. the byte immediately after the start code). */
-    size_t starts[256];
-    int    nals = 0;
+     * (i.e. the byte immediately after the start code).  Track each
+     * start-code length so that we can compute the exact NAL boundary
+     * without relying on trailing-zero trimming alone. */
+    size_t  starts[256];
+    uint8_t sc_lens[256]; /* 3 or 4 */
+    int     nals = 0;
 
     for (size_t i = 0; i + 2 < size && nals < 256; ) {
         int sc = 0;
@@ -423,7 +448,9 @@ static void rtp_send_h264(struct webrtc_output *out,
             sc = 3;
         }
         if (sc) {
-            starts[nals++] = i + (size_t)sc;
+            starts[nals]   = i + (size_t)sc;
+            sc_lens[nals]  = (uint8_t)sc;
+            nals++;
             i += (size_t)sc;
         } else {
             i++;
@@ -432,14 +459,15 @@ static void rtp_send_h264(struct webrtc_output *out,
 
     for (int n = 0; n < nals; n++) {
         size_t s = starts[n];
-        /* Compute end: start of next start-code sequence */
-        size_t e = (n + 1 < nals) ? starts[n + 1] - 3 : size;
-        /* Trim trailing zero bytes that belong to the next start code.
-         * The initial estimate uses -3 (minimum start-code length), so for
-         * a 4-byte start code there will be trailing 0x00 bytes to strip.
-         * Note: valid H.264 RBSP NAL units never end with 0x00 (the RBSP
-         * trailing-bit byte always has its stop bit set), so this trim is
-         * safe and will not discard legitimate payload bytes. */
+        /* Compute end: start of the next start-code pattern (not the byte
+         * after it).  Using the recorded sc_len gives the exact boundary
+         * regardless of whether the next code is 3 or 4 bytes. */
+        size_t e = (n + 1 < nals)
+                   ? starts[n + 1] - sc_lens[n + 1]
+                   : size;
+        /* Trim any remaining trailing zero bytes (these can legitimately
+         * appear as extra zero_byte() elements before a start code per the
+         * Annex-B spec, and are never part of the RBSP payload). */
         while (e > s && data[e - 1] == 0)
             e--;
         if (e <= s) continue;
@@ -676,6 +704,17 @@ static void handle_http_conn(struct webrtc_output *out, sock_t cs)
         char *offer = (char *)malloc((size_t)clen + 1);
         if (!offer) { http_respond(cs, 500, "text/plain", "OOM", -1); return; }
 
+        /* Set a receive timeout so we don't block forever if the client
+         * sends fewer bytes than Content-Length promises. */
+#ifdef _WIN32
+        DWORD tv_ms = 10000;
+        setsockopt(cs, SOL_SOCKET, SO_RCVTIMEO,
+                   (const char *)&tv_ms, sizeof(tv_ms));
+#else
+        struct timeval tv = {10, 0}; /* 10 s */
+        setsockopt(cs, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+#endif
+
         int received = 0;
         while (received < clen) {
             int r = (int)recv(cs, offer + received,
@@ -843,6 +882,10 @@ static void flush_opus_frame(struct webrtc_output *out)
             memcpy(pkt + 12, out->opus_pkt->data, (size_t)plen);
             if (out->audio_tr >= 0)
                 rtcSendMessage(out->audio_tr, (const char *)pkt, 12 + plen);
+        } else {
+            fprintf(stderr,
+                    "[WebRTC] Opus packet too large (%d bytes), dropping\n",
+                    plen);
         }
         av_packet_unref(out->opus_pkt);
     }
@@ -883,12 +926,7 @@ struct webrtc_output *webrtc_output_create(int http_port)
 
     /* Cryptographically secure random SSRCs (low bits forced non-zero) */
     uint32_t rnd[2] = {0, 0};
-    if (RAND_bytes((unsigned char *)rnd, sizeof(rnd)) != 1) {
-        /* Fall back to time-seeded rand() if OpenSSL RAND is unavailable */
-        srand((unsigned)time(NULL));
-        rnd[0] = (uint32_t)rand();
-        rnd[1] = (uint32_t)rand();
-    }
+    secure_random((unsigned char *)rnd, sizeof(rnd));
     out->video_ssrc = rnd[0] | 1u;
     out->audio_ssrc = rnd[1] | 1u;
 
@@ -1021,6 +1059,10 @@ void webrtc_output_write_audio(struct webrtc_output *out,
     if (converted > 0) {
         int space = AUDIO_BUF_CAP - out->audio_buf_n;
         int copy  = (converted < space) ? converted : space;
+        if (copy < converted)
+            fprintf(stderr,
+                    "[WebRTC] Audio buffer full: dropped %d samples\n",
+                    converted - copy);
         memcpy(out->audio_buf + (size_t)(out->audio_buf_n * OPUS_CHANNELS),
                tmp,
                (size_t)(copy * OPUS_CHANNELS) * sizeof(float));

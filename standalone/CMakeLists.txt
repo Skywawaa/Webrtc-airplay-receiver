@@ -150,12 +150,18 @@ if(NOT LIBDATACHANNEL_LIB)
         "https://github.com/paullouisageneau/libdatachannel/releases "
         "and place it in deps/libdatachannel/ (or pass -DLIBDATACHANNEL_DIR=...)")
 endif()
-message(STATUS "[standalone] libdatachannel: ${LIBDATACHANNEL_LIB}")
+# Inform the user which variant (dynamic DLL import lib or static) was selected.
+get_filename_component(_ldc_name "${LIBDATACHANNEL_LIB}" NAME_WE)
+if(_ldc_name MATCHES "static")
+    message(STATUS "[standalone] libdatachannel: ${LIBDATACHANNEL_LIB} (static)")
+else()
+    message(STATUS "[standalone] libdatachannel: ${LIBDATACHANNEL_LIB} (dynamic — copy datachannel.dll next to airplay-stream.exe)")
+endif()
 target_link_libraries(airplay-stream PRIVATE ${LIBDATACHANNEL_LIB})
 
 # Windows system libraries
 target_link_libraries(airplay-stream PRIVATE
-    ws2_32 iphlpapi
+    ws2_32 iphlpapi bcrypt
     ${DEPS_DIR}/w32-pthreads.lib
     ${DEPS_DIR}/dnssd.lib
 )
