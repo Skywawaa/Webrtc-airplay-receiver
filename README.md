@@ -201,7 +201,7 @@ All commands below should be run from a **VS Developer Command Prompt**.
 
 - **Device doesn't see the receiver** — Check that Bonjour is installed and Windows Firewall allows TCP 7000 and UDP 5353
 - **Browser shows "Connecting…" forever** — Check that the LiveKit server is running (`docker ps`) and that port 7880 is reachable from the machine
-- **"WHIP publish failed"** — LiveKit is not running or the URL / credentials are wrong; verify with `curl http://localhost:7880/` which should return a JSON health response
+- **"WHIP publish failed"** — LiveKit is not running or the URL / credentials are wrong; verify with `curl http://localhost:7880/` which should return `OK`. The app publishes to the `/rtc/whip` endpoint on that port.
 - **Video freezes after reconnect** — Normal; the publisher automatically reconnects within ~5 s; the browser SDK reconnects within ~2 s
 - **`--hw-accel` has no effect** — Your system may not have a supported hardware codec; the tool automatically falls back to software processing
 - **One AirPlay client at a time** — AirPlay screen mirroring supports a single connected device

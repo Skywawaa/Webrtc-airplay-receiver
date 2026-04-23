@@ -767,9 +767,9 @@ static bool whip_post(const char *url, const char *token,
         return false;
     }
 
-    /* Use /whip as the WHIP endpoint when no specific path is given */
+    /* Use /rtc/whip as the WHIP endpoint when no specific path is given */
     if (strcmp(path, "/") == 0)
-        strncpy(path, "/whip", sizeof(path) - 1);
+        strncpy(path, "/rtc/whip", sizeof(path) - 1);
 
     /* Resolve hostname */
     struct addrinfo hints, *res = NULL;
