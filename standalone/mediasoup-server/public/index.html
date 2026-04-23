@@ -96,20 +96,25 @@ async function connect() {
         send({ type: 'connectTransport', dtlsParameters });
     });
 
-    /* ---- Step 3: consume (triggers 'connect' event above) ---- */
+    /* ---- Step 3: request consumers from server ---- */
     send({ type: 'consume', rtpCapabilities: device.rtpCapabilities });
-    /* Resolve transport connect callback once server confirms DTLS */
-    function onTransportConnected() {
+    const consumerParams = await waitFor('consumed');
+
+    /* ---- Step 4: create client-side consumers ----
+     * Register the transportConnected handler *before* the first consume()
+     * call, because consume() fires the 'connect' event which sends
+     * connectTransport to the server, and the server replies immediately
+     * with transportConnected.  Waiting for transportConnected inside
+     * Promise.all() alongside consumed causes a deadlock: consumed arrives
+     * first, but transportConnected can only arrive after recvTransport
+     * .consume() is called, which only happens after the Promise.all
+     * resolves — so it never resolves. */
+    waitFor('transportConnected').then(() => {
         if (connectResolve) {
             connectResolve();
             connectResolve = null;
         }
-    }
-
-    const [consumerParams] = await Promise.all([
-        waitFor('consumed'),
-        waitFor('transportConnected').then(onTransportConnected),
-    ]);
+    });
 
     const tracks = { video: null, audio: null };
     for (const params of consumerParams) {
