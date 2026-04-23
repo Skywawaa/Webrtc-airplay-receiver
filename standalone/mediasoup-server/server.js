@@ -29,7 +29,7 @@ const path      = require('path');
 /* Configuration                                                        */
 /* ------------------------------------------------------------------ */
 
-const HTTP_PORT      = parseInt(process.env.PORT          || '8888',  10);
+const SERVER_PORT    = parseInt(process.env.PORT          || '8888',  10);
 const ANNOUNCED_IP   = process.env.ANNOUNCED_IP            || '127.0.0.1';
 const RTC_MIN_PORT   = parseInt(process.env.RTC_MIN_PORT  || '40000', 10);
 const RTC_MAX_PORT   = parseInt(process.env.RTC_MAX_PORT  || '40100', 10);
@@ -297,10 +297,10 @@ async function startServer() {
     const wss = new WebSocketServer({ server });
     wss.on('connection', handleBrowserSocket);
 
-    server.listen(HTTP_PORT, () => {
-        console.log(`[server] Listening on http://localhost:${HTTP_PORT}/`);
+    server.listen(SERVER_PORT, () => {
+        console.log(`[server] Listening on http://localhost:${SERVER_PORT}/`);
         console.log('[server] Open that URL in a browser to watch the AirPlay stream.');
-        console.log('[server] Start airplay-stream.exe --port', HTTP_PORT);
+        console.log('[server] Start airplay-stream.exe --port', SERVER_PORT);
     });
 }
 
