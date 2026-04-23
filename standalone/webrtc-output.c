@@ -151,6 +151,12 @@ static void thread_start(void (*fn)(void *), void *arg) {
 #include <libswresample/swresample.h>
 
 /* ------------------------------------------------------------------ */
+/* OpenSSL (secure random for SSRC generation)                         */
+/* ------------------------------------------------------------------ */
+
+#include <openssl/rand.h>
+
+/* ------------------------------------------------------------------ */
 /* libdatachannel C API                                                 */
 /* ------------------------------------------------------------------ */
 
@@ -170,6 +176,12 @@ static void thread_start(void (*fn)(void *), void *arg) {
 /* Per-channel sample accumulation buffer (covers several Opus frames) */
 #define AUDIO_BUF_FRAMES 8
 #define AUDIO_BUF_CAP    (OPUS_FRAME_SIZE * AUDIO_BUF_FRAMES)
+
+/* Maximum SDP body size accepted from the browser */
+#define MAX_SDP_OFFER_SIZE  65536
+
+/* Temporary stack buffer for one SWR resample call (per-channel samples) */
+#define RESAMPLE_TMP_CAP    (OPUS_FRAME_SIZE * 4)
 
 /* ------------------------------------------------------------------ */
 /* Embedded HTML player                                                 */
@@ -422,8 +434,13 @@ static void rtp_send_h264(struct webrtc_output *out,
         size_t s = starts[n];
         /* Compute end: start of next start-code sequence */
         size_t e = (n + 1 < nals) ? starts[n + 1] - 3 : size;
-        /* Trim trailing zero bytes that belong to the next start code */
-        while (e > s + 1 && data[e - 1] == 0)
+        /* Trim trailing zero bytes that belong to the next start code.
+         * The initial estimate uses -3 (minimum start-code length), so for
+         * a 4-byte start code there will be trailing 0x00 bytes to strip.
+         * Note: valid H.264 RBSP NAL units never end with 0x00 (the RBSP
+         * trailing-bit byte always has its stop bit set), so this trim is
+         * safe and will not discard legitimate payload bytes. */
+        while (e > s && data[e - 1] == 0)
             e--;
         if (e <= s) continue;
         rtp_send_nal(out, data + s, (int)(e - s), ts, (n == nals - 1));
@@ -506,9 +523,10 @@ static bool handle_offer(struct webrtc_output *out,
     rtcOnStateChange(pc, on_pc_state, out);
     rtcOnGatheringStateChange(pc, on_gathering_state, out);
 
-    /* Build SDP media section strings using the PT we extracted */
+    /* Build SDP media section strings using the PT we extracted.
+     * Buffers are 512 bytes; the largest possible string is well under 256. */
     char vdesc[512], adesc[512];
-    snprintf(vdesc, sizeof(vdesc),
+    int vdesc_len = snprintf(vdesc, sizeof(vdesc),
         "video 9 UDP/TLS/RTP/SAVPF %d\r\n"
         "a=mid:video\r\n"
         "a=rtpmap:%d H264/90000\r\n"
@@ -517,8 +535,7 @@ static bool handle_offer(struct webrtc_output *out,
         "a=sendonly\r\n"
         "a=ssrc:%u cname:airplay\r\n",
         h264_pt, h264_pt, h264_pt, out->video_ssrc);
-
-    snprintf(adesc, sizeof(adesc),
+    int adesc_len = snprintf(adesc, sizeof(adesc),
         "audio 9 UDP/TLS/RTP/SAVPF %d\r\n"
         "a=mid:audio\r\n"
         "a=rtpmap:%d opus/48000/2\r\n"
@@ -526,6 +543,12 @@ static bool handle_offer(struct webrtc_output *out,
         "a=sendonly\r\n"
         "a=ssrc:%u cname:airplay\r\n",
         opus_pt, opus_pt, opus_pt, out->audio_ssrc);
+    if (vdesc_len <= 0 || vdesc_len >= (int)sizeof(vdesc) ||
+        adesc_len <= 0 || adesc_len >= (int)sizeof(adesc)) {
+        fprintf(stderr, "[WebRTC] SDP media description too long\n");
+        rtcDeletePeerConnection(pc);
+        return false;
+    }
 
     int vtr = rtcAddTrack(pc, vdesc);
     int atr = rtcAddTrack(pc, adesc);
@@ -646,7 +669,7 @@ static void handle_http_conn(struct webrtc_output *out, sock_t cs)
     /* POST /offer → WebRTC signalling */
     if (is_post && plen == 6 && strncmp(path, "/offer", 6) == 0) {
         int clen = parse_content_length(hbuf);
-        if (clen <= 0 || clen > 65536) {
+        if (clen <= 0 || clen > MAX_SDP_OFFER_SIZE) {
             http_respond(cs, 400, "text/plain", "Bad Request", -1);
             return;
         }
@@ -808,10 +831,11 @@ static void flush_opus_frame(struct webrtc_output *out)
     if (avcodec_send_frame(out->opus_ctx, out->opus_frame) < 0) goto shift;
 
     while (avcodec_receive_packet(out->opus_ctx, out->opus_pkt) == 0) {
-        /* Build: 12-byte RTP header + Opus payload */
+        /* Build: 12-byte RTP header + Opus payload.
+         * Max Opus payload per RFC 7587 is 1276 bytes; use a stack buffer. */
         int     plen = out->opus_pkt->size;
-        uint8_t *pkt = (uint8_t *)malloc((size_t)(12 + plen));
-        if (pkt) {
+        uint8_t pkt[12 + 1276];
+        if (plen <= (int)(sizeof(pkt) - 12)) {
             rtp_write_header(pkt, out->audio_pt, false,
                              out->audio_seq++,
                              (uint32_t)out->audio_rtp_ts,
@@ -819,7 +843,6 @@ static void flush_opus_frame(struct webrtc_output *out)
             memcpy(pkt + 12, out->opus_pkt->data, (size_t)plen);
             if (out->audio_tr >= 0)
                 rtcSendMessage(out->audio_tr, (const char *)pkt, 12 + plen);
-            free(pkt);
         }
         av_packet_unref(out->opus_pkt);
     }
@@ -858,10 +881,16 @@ struct webrtc_output *webrtc_output_create(int http_port)
     out->audio_pt    = OPUS_PT_DEFAULT;
     out->http_listen = INVALID_SOCK;
 
-    /* Pseudo-random SSRCs (low bits forced non-zero to avoid 0 SSRC) */
-    srand((unsigned)time(NULL));
-    out->video_ssrc = ((uint32_t)rand() << 1) | 1u;
-    out->audio_ssrc = ((uint32_t)rand() << 1) | 1u;
+    /* Cryptographically secure random SSRCs (low bits forced non-zero) */
+    uint32_t rnd[2] = {0, 0};
+    if (RAND_bytes((unsigned char *)rnd, sizeof(rnd)) != 1) {
+        /* Fall back to time-seeded rand() if OpenSSL RAND is unavailable */
+        srand((unsigned)time(NULL));
+        rnd[0] = (uint32_t)rand();
+        rnd[1] = (uint32_t)rand();
+    }
+    out->video_ssrc = rnd[0] | 1u;
+    out->audio_ssrc = rnd[1] | 1u;
 
     mutex_init(&out->lock);
 
@@ -977,14 +1006,13 @@ void webrtc_output_write_audio(struct webrtc_output *out,
         return;
     }
 
-    /* Resample: interleaved float at in_rate → interleaved float at 48 kHz */
-    int out_max = (int)((int64_t)(swr_get_delay(out->swr, sample_rate) + samples)
-                        * OPUS_SAMPLE_RATE / sample_rate + 16);
-    float *tmp = (float *)malloc((size_t)(out_max * OPUS_CHANNELS) * sizeof(float));
-    if (!tmp) {
-        mutex_unlock(&out->lock);
-        return;
-    }
+    /* Resample: interleaved float at in_rate → interleaved float at 48 kHz.
+     * RESAMPLE_TMP_CAP covers 4× one Opus frame after rate conversion from
+     * 44100 Hz (worst case: 960 * 48000/44100 ≈ 1045 samples per call).
+     * For unusually large input blocks the excess is simply clipped at
+     * AUDIO_BUF_CAP when appending to the accumulation buffer. */
+    float   tmp[RESAMPLE_TMP_CAP * OPUS_CHANNELS];
+    int     out_max = RESAMPLE_TMP_CAP;
 
     const uint8_t *in_ptr  = (const uint8_t *)pcm;
     uint8_t       *out_ptr = (uint8_t *)tmp;
@@ -1003,6 +1031,5 @@ void webrtc_output_write_audio(struct webrtc_output *out,
             flush_opus_frame(out);
     }
 
-    free(tmp);
     mutex_unlock(&out->lock);
 }
