@@ -1183,8 +1183,12 @@ struct webrtc_output *webrtc_output_create_with_options(
                 video_mode_name(out->video_mode));
     }
 
+    fprintf(stdout, "[WebRTC] Initializing mutex...\n");
+    fflush(stdout);
     mutex_init(&out->lock);
 
+    fprintf(stdout, "[WebRTC] Initializing Opus encoder...\n");
+    fflush(stdout);
     if (!opus_encoder_init(out)) {
         out->opus_disabled = true;
         fprintf(stderr,
@@ -1192,6 +1196,8 @@ struct webrtc_output *webrtc_output_create_with_options(
         fflush(stderr);
     }
 
+    fprintf(stdout, "[WebRTC] Starting connect thread...\n");
+    fflush(stdout);
     /* Start background thread to connect to mediasoup */
     thread_start(connect_thread, out);
     fflush(stdout);
