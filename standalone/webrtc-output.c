@@ -108,7 +108,10 @@ static void thread_start(void (*fn)(void *), void *arg) {
 #include <libavcodec/avcodec.h>
 #include <libavutil/opt.h>
 #include <libavutil/channel_layout.h>
+#include <libavutil/imgutils.h>
+#include <libavutil/pixdesc.h>
 #include <libswresample/swresample.h>
+#include <libswscale/swscale.h>
 
 /* ------------------------------------------------------------------ */
 /* Constants                                                            */
@@ -161,6 +164,10 @@ static void thread_start(void (*fn)(void *), void *arg) {
  */
 #define KEYFRAME_CACHE_MAX_AGE_US 500000
 
+#define TRANSCODE_TARGET_FPS          60
+#define TRANSCODE_GOP_FRAMES          30
+#define TRANSCODE_BITRATE_BPS   4000000
+
 /* ------------------------------------------------------------------ */
 /* State                                                                */
 /* ------------------------------------------------------------------ */
@@ -212,6 +219,19 @@ struct webrtc_output {
     webrtc_video_encoder_preference_t video_encoder_preference;
     const AVCodec *selected_video_encoder;
     bool transcode_warning_logged;
+
+    /* Optional transcode pipeline (decode incoming H264 then re-encode). */
+    const AVCodec *video_dec_codec;
+    AVCodecContext *video_dec_ctx;
+    AVFrame *video_dec_frame;
+
+    AVCodecContext *video_enc_ctx;
+    AVFrame *video_enc_frame;
+    AVPacket *video_enc_pkt;
+    struct SwsContext *video_sws;
+    enum AVPixelFormat video_src_fmt;
+    bool transcode_active;
+    int64_t transcode_frame_index;
 };
 
 static const char *video_mode_name(webrtc_video_mode_t mode)
@@ -267,6 +287,254 @@ static const AVCodec *find_video_encoder_by_preference(
         if (enc) return enc;
         return avcodec_find_encoder(AV_CODEC_ID_H264);
     }
+    }
+}
+
+static bool encoder_supports_pix_fmt(const AVCodec *codec,
+                                     enum AVPixelFormat fmt)
+{
+    if (!codec || !codec->pix_fmts)
+        return true;
+    for (const enum AVPixelFormat *p = codec->pix_fmts;
+         *p != AV_PIX_FMT_NONE; ++p) {
+        if (*p == fmt)
+            return true;
+    }
+    return false;
+}
+
+static enum AVPixelFormat pick_encoder_pix_fmt(const AVCodec *codec,
+                                               enum AVPixelFormat src_fmt)
+{
+    if (!codec)
+        return src_fmt;
+    if (encoder_supports_pix_fmt(codec, src_fmt))
+        return src_fmt;
+    if (codec->pix_fmts && codec->pix_fmts[0] != AV_PIX_FMT_NONE)
+        return codec->pix_fmts[0];
+    return AV_PIX_FMT_YUV420P;
+}
+
+static bool transcode_init_decoder(struct webrtc_output *out)
+{
+    out->video_dec_codec = avcodec_find_decoder(AV_CODEC_ID_H264);
+    if (!out->video_dec_codec) {
+        fprintf(stderr, "[WebRTC] No H264 decoder available for transcode mode\n");
+        return false;
+    }
+
+    out->video_dec_ctx = avcodec_alloc_context3(out->video_dec_codec);
+    if (!out->video_dec_ctx)
+        return false;
+
+    if (avcodec_open2(out->video_dec_ctx, out->video_dec_codec, NULL) < 0) {
+        fprintf(stderr, "[WebRTC] Failed to open H264 decoder for transcode mode\n");
+        return false;
+    }
+
+    out->video_dec_frame = av_frame_alloc();
+    return out->video_dec_frame != NULL;
+}
+
+static bool transcode_init_encoder_for_frame(struct webrtc_output *out,
+                                             const AVFrame *src_frame)
+{
+    if (!out->selected_video_encoder || !src_frame)
+        return false;
+
+    out->video_enc_ctx = avcodec_alloc_context3(out->selected_video_encoder);
+    if (!out->video_enc_ctx)
+        return false;
+
+    enum AVPixelFormat enc_fmt = pick_encoder_pix_fmt(
+        out->selected_video_encoder,
+        (enum AVPixelFormat)src_frame->format);
+
+    out->video_src_fmt = (enum AVPixelFormat)src_frame->format;
+    out->video_enc_ctx->width  = src_frame->width;
+    out->video_enc_ctx->height = src_frame->height;
+    out->video_enc_ctx->pix_fmt = enc_fmt;
+    out->video_enc_ctx->time_base = (AVRational){1, TRANSCODE_TARGET_FPS};
+    out->video_enc_ctx->framerate = (AVRational){TRANSCODE_TARGET_FPS, 1};
+    out->video_enc_ctx->gop_size = TRANSCODE_GOP_FRAMES;
+    out->video_enc_ctx->max_b_frames = 0;
+    out->video_enc_ctx->bit_rate = TRANSCODE_BITRATE_BPS;
+
+    av_opt_set(out->video_enc_ctx->priv_data, "preset", "p4", 0);
+    av_opt_set(out->video_enc_ctx->priv_data, "tune", "ll", 0);
+    av_opt_set(out->video_enc_ctx->priv_data, "rc", "cbr", 0);
+    av_opt_set(out->video_enc_ctx->priv_data, "forced-idr", "1", 0);
+    av_opt_set(out->video_enc_ctx->priv_data, "annexb", "1", 0);
+
+    if (avcodec_open2(out->video_enc_ctx, out->selected_video_encoder, NULL) < 0) {
+        fprintf(stderr, "[WebRTC] Failed to open video encoder %s\n",
+                out->selected_video_encoder->name);
+        return false;
+    }
+
+    out->video_enc_pkt = av_packet_alloc();
+    if (!out->video_enc_pkt)
+        return false;
+
+    if (out->video_src_fmt != out->video_enc_ctx->pix_fmt) {
+        out->video_sws = sws_getContext(
+            src_frame->width,
+            src_frame->height,
+            out->video_src_fmt,
+            out->video_enc_ctx->width,
+            out->video_enc_ctx->height,
+            out->video_enc_ctx->pix_fmt,
+            SWS_FAST_BILINEAR,
+            NULL,
+            NULL,
+            NULL);
+        if (!out->video_sws) {
+            fprintf(stderr, "[WebRTC] Failed to create swscale context\n");
+            return false;
+        }
+
+        out->video_enc_frame = av_frame_alloc();
+        if (!out->video_enc_frame)
+            return false;
+        out->video_enc_frame->format = out->video_enc_ctx->pix_fmt;
+        out->video_enc_frame->width  = out->video_enc_ctx->width;
+        out->video_enc_frame->height = out->video_enc_ctx->height;
+        if (av_frame_get_buffer(out->video_enc_frame, 32) < 0)
+            return false;
+    }
+
+    out->transcode_frame_index = 0;
+    out->transcode_active = true;
+
+    fprintf(stdout,
+            "[WebRTC] Transcode initialized: %s %dx%d %s gop=%d\n",
+            out->selected_video_encoder->name,
+            out->video_enc_ctx->width,
+            out->video_enc_ctx->height,
+            av_get_pix_fmt_name(out->video_enc_ctx->pix_fmt),
+            out->video_enc_ctx->gop_size);
+
+    return true;
+}
+
+static void transcode_destroy(struct webrtc_output *out)
+{
+    if (!out) return;
+    if (out->video_sws) {
+        sws_freeContext(out->video_sws);
+        out->video_sws = NULL;
+    }
+    if (out->video_enc_frame) {
+        av_frame_free(&out->video_enc_frame);
+    }
+    if (out->video_enc_pkt) {
+        av_packet_free(&out->video_enc_pkt);
+    }
+    if (out->video_enc_ctx) {
+        avcodec_free_context(&out->video_enc_ctx);
+    }
+    if (out->video_dec_frame) {
+        av_frame_free(&out->video_dec_frame);
+    }
+    if (out->video_dec_ctx) {
+        avcodec_free_context(&out->video_dec_ctx);
+    }
+    out->transcode_active = false;
+}
+
+static void rtp_send_h264_access_unit(struct webrtc_output *out,
+                                      const uint8_t *data,
+                                      size_t size,
+                                      uint32_t ts)
+{
+    if (!out || !data || size == 0)
+        return;
+
+    if ((size >= 4 && data[0] == 0 && data[1] == 0 &&
+         ((data[2] == 1) || (data[2] == 0 && data[3] == 1)))) {
+        rtp_send_h264(out, data, size, ts);
+        return;
+    }
+
+    /* AVCC packet fallback (length-prefixed NAL units, 4-byte lengths). */
+    size_t off = 0;
+    while (off + 4 <= size) {
+        uint32_t nalu_len = ((uint32_t)data[off] << 24) |
+                            ((uint32_t)data[off + 1] << 16) |
+                            ((uint32_t)data[off + 2] << 8) |
+                            (uint32_t)data[off + 3];
+        off += 4;
+        if (nalu_len == 0 || off + nalu_len > size)
+            break;
+        bool marker = (off + nalu_len == size);
+        rtp_send_nal(out, data + off, (int)nalu_len, ts, marker);
+        off += nalu_len;
+    }
+}
+
+static void transcode_process_video(struct webrtc_output *out,
+                                    const uint8_t *data,
+                                    size_t size,
+                                    int64_t pts_us)
+{
+    AVPacket in_pkt;
+    av_init_packet(&in_pkt);
+    in_pkt.data = (uint8_t *)data;
+    in_pkt.size = (int)size;
+
+    if (avcodec_send_packet(out->video_dec_ctx, &in_pkt) < 0)
+        return;
+
+    while (avcodec_receive_frame(out->video_dec_ctx, out->video_dec_frame) == 0) {
+        AVFrame *enc_input = out->video_dec_frame;
+
+        if (!out->transcode_active) {
+            if (!transcode_init_encoder_for_frame(out, out->video_dec_frame)) {
+                if (!out->transcode_warning_logged) {
+                    out->transcode_warning_logged = true;
+                    fprintf(stderr,
+                            "[WebRTC] Transcode init failed, falling back to passthrough\n");
+                }
+                out->video_mode = WEBRTC_VIDEO_MODE_PASSTHROUGH;
+                return;
+            }
+        }
+
+        if (out->video_sws && out->video_enc_frame) {
+            if (av_frame_make_writable(out->video_enc_frame) < 0)
+                return;
+            sws_scale(out->video_sws,
+                      (const uint8_t * const *)out->video_dec_frame->data,
+                      out->video_dec_frame->linesize,
+                      0,
+                      out->video_dec_ctx->height,
+                      out->video_enc_frame->data,
+                      out->video_enc_frame->linesize);
+            enc_input = out->video_enc_frame;
+        }
+
+        enc_input->pts = out->transcode_frame_index++;
+        if (out->needs_keyframe) {
+            enc_input->pict_type = AV_PICTURE_TYPE_I;
+            enc_input->key_frame = 1;
+            out->needs_keyframe = false;
+        } else {
+            enc_input->pict_type = AV_PICTURE_TYPE_NONE;
+            enc_input->key_frame = 0;
+        }
+
+        if (avcodec_send_frame(out->video_enc_ctx, enc_input) < 0)
+            continue;
+
+        while (avcodec_receive_packet(out->video_enc_ctx, out->video_enc_pkt) == 0) {
+            uint32_t ts = (uint32_t)
+                ((pts_us * (int64_t)H264_CLOCK_RATE) / 1000000LL);
+            rtp_send_h264_access_unit(out,
+                                      out->video_enc_pkt->data,
+                                      (size_t)out->video_enc_pkt->size,
+                                      ts);
+            av_packet_unref(out->video_enc_pkt);
+        }
     }
 }
 
@@ -865,6 +1133,11 @@ struct webrtc_output *webrtc_output_create_with_options(
         out->selected_video_encoder =
             find_video_encoder_by_preference(out->video_encoder_preference);
         if (out->selected_video_encoder) {
+            if (!transcode_init_decoder(out)) {
+                fprintf(stdout,
+                        "[WebRTC] Transcode decode init failed; falling back to passthrough\n");
+                out->video_mode = WEBRTC_VIDEO_MODE_PASSTHROUGH;
+            }
             fprintf(stdout,
                     "[WebRTC] Video mode=%s, encoder_pref=%s, selected=%s\n",
                     video_mode_name(out->video_mode),
@@ -923,6 +1196,7 @@ void webrtc_output_destroy(struct webrtc_output *out)
     out->ready = false;
     mutex_unlock(&out->lock);
 
+    transcode_destroy(out);
     opus_encoder_destroy(out);
     free(out->keyframe_cache);
     mutex_destroy(&out->lock);
@@ -935,15 +1209,6 @@ void webrtc_output_write_video(struct webrtc_output *out,
 {
     if (!out || !data || size == 0) return;
 
-    if (out->video_mode == WEBRTC_VIDEO_MODE_TRANSCODE_AUTO &&
-        !out->transcode_warning_logged) {
-        out->transcode_warning_logged = true;
-        fprintf(stdout,
-                "[WebRTC] Transcode mode selected (%s) but transcode pipeline "
-                "is not enabled yet; using passthrough for now\n",
-                out->selected_video_encoder ? out->selected_video_encoder->name : "none");
-    }
-
     mutex_lock(&out->lock);
 
     if (out->ready && video_sock_poll_keyframe_feedback(out))
@@ -955,6 +1220,17 @@ void webrtc_output_write_video(struct webrtc_output *out,
         fprintf(stdout,
                 "[WebRTC] RTCP keyframe feedback received (count=%llu)\n",
                 (unsigned long long)out->rtcp_keyframe_req_count);
+    }
+
+    if (out->video_mode == WEBRTC_VIDEO_MODE_TRANSCODE_AUTO &&
+        out->selected_video_encoder && out->video_dec_ctx) {
+        if (!out->ready || out->video_sock == INVALID_SOCK) {
+            mutex_unlock(&out->lock);
+            return;
+        }
+        transcode_process_video(out, data, size, pts_us);
+        mutex_unlock(&out->lock);
+        return;
     }
 
     /* Always cache the most recent IDR frame so that when the AirPlay

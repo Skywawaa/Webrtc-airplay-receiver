@@ -115,7 +115,7 @@ target_link_libraries(airplay-stream PRIVATE
 # FFmpeg
 target_link_directories(airplay-stream PRIVATE ${FFMPEG_LIB_DIR})
 target_link_libraries(airplay-stream PRIVATE
-    avcodec avutil swresample
+    avcodec avutil swresample swscale
 )
 
 # libdatachannel removed — WebRTC is now handled by the mediasoup Node.js SFU.
