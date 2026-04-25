@@ -864,31 +864,22 @@ void webrtc_output_write_video(struct webrtc_output *out,
         if (is_idr)
             out->needs_keyframe = false;
 
-        /* Inject a cached keyframe only if it is recent enough to belong to
-         * the active GOP. Re-injecting an old IDR can freeze playback on that
-         * stale frame after a browser reload. If the cache is stale, keep
-         * waiting for the next natural IDR from the source stream. */
+        /* Inject a cached keyframe when a new viewer arrives and needs sync.
+         * During normal playback (needs_keyframe=false), we let live frames flow
+         * through. At reconnect (needs_keyframe=true), inject the most recent
+         * cached IDR immediately so the viewer sees something right away. */
         if (out->needs_keyframe && out->keyframe_cache &&
             out->keyframe_cache_size > 0) {
-            int64_t age_us = pts_us - out->keyframe_cache_pts_us;
-            if (age_us >= 0 && age_us <= KEYFRAME_CACHE_MAX_AGE_US) {
-                uint32_t kf_ts = (ts >= H264_FRAME_TICKS)
-                                 ? ts - H264_FRAME_TICKS : 0;
-                rtp_send_h264(out, out->keyframe_cache,
-                              out->keyframe_cache_size, kf_ts);
-                out->needs_keyframe = false;
-                out->injected_keyframe_count++;
-                fprintf(stdout,
-                        "[WebRTC] Injected cached IDR for viewer sync "
-                        "(count=%llu, age=%lld us)\n",
-                        (unsigned long long)out->injected_keyframe_count,
-                        (long long)age_us);
-            } else {
-                fprintf(stdout,
-                        "[WebRTC] Deferred keyframe injection: cache age %lld us "
-                        "(max %d us), waiting for natural IDR\n",
-                        (long long)age_us, KEYFRAME_CACHE_MAX_AGE_US);
-            }
+            uint32_t kf_ts = (ts >= H264_FRAME_TICKS)
+                             ? ts - H264_FRAME_TICKS : 0;
+            rtp_send_h264(out, out->keyframe_cache,
+                          out->keyframe_cache_size, kf_ts);
+            out->needs_keyframe = false;
+            out->injected_keyframe_count++;
+            fprintf(stdout,
+                    "[WebRTC] Injected cached IDR for new viewer "
+                    "(count=%llu)\n",
+                    (unsigned long long)out->injected_keyframe_count);
         }
 
         rtp_send_h264(out, data, size, ts);
