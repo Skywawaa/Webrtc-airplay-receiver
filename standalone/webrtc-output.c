@@ -42,6 +42,12 @@ typedef SOCKET sock_t;
 
 static void sock_close(sock_t s) { closesocket(s); }
 
+static void sock_set_nonblocking(sock_t s)
+{
+    u_long mode = 1;
+    ioctlsocket(s, FIONBIO, &mode);
+}
+
 typedef CRITICAL_SECTION wrtc_mutex_t;
 static void mutex_init(wrtc_mutex_t *m)    { InitializeCriticalSection(m); }
 static void mutex_lock(wrtc_mutex_t *m)    { EnterCriticalSection(m); }
@@ -68,6 +74,13 @@ typedef int  sock_t;
 #  define INVALID_SOCK (-1)
 
 static void sock_close(sock_t s) { close(s); }
+
+static void sock_set_nonblocking(sock_t s)
+{
+    int flags = fcntl(s, F_GETFL, 0);
+    if (flags >= 0)
+        fcntl(s, F_SETFL, flags | O_NONBLOCK);
+}
 
 typedef pthread_mutex_t wrtc_mutex_t;
 static void mutex_init(wrtc_mutex_t *m)    { pthread_mutex_init(m,NULL); }
@@ -268,69 +281,6 @@ static bool http_get_rtp_params(int port, int *video_port, int *audio_port)
     return true;
 }
 
-/*
- * Poll GET /keyframe-needed on the mediasoup HTTP server.
- * Returns true if the server reports that a new browser consumer has
- * connected and needs the cached IDR frame injected into the RTP stream.
- * Returns false on any error or when no keyframe is needed.
- */
-static bool http_get_keyframe_needed(int port)
-{
-    sock_t s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (s == INVALID_SOCK) return false;
-
-#ifdef _WIN32
-    DWORD tv_ms = 2000;
-    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (const char *)&tv_ms, sizeof(tv_ms));
-    setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, (const char *)&tv_ms, sizeof(tv_ms));
-#else
-    struct timeval tv = {2, 0};
-    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-    setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
-#endif
-
-    struct sockaddr_in addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sin_family      = AF_INET;
-    addr.sin_port        = htons((unsigned short)port);
-    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-
-    if (connect(s, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
-        sock_close(s);
-        return false;
-    }
-
-    const char *req =
-        "GET /keyframe-needed HTTP/1.0\r\n"
-        "Host: 127.0.0.1\r\n"
-        "Connection: close\r\n"
-        "\r\n";
-    if (send(s, req, (int)strlen(req), 0) < 0) {
-        sock_close(s);
-        return false;
-    }
-
-    char buf[512];
-    int  total = 0, r;
-    while (total < (int)(sizeof(buf) - 1) &&
-           (r = (int)recv(s, buf + total,
-                          sizeof(buf) - 1 - (size_t)total, 0)) > 0)
-        total += r;
-    sock_close(s);
-
-    if (total <= 0) return false;
-    buf[total] = '\0';
-
-    /* Skip HTTP headers */
-    char *body = strstr(buf, "\r\n\r\n");
-    if (!body) return false;
-    body += 4;
-
-    /* Accept both compact and spaced JSON: "needed":true / "needed": true */
-    return strstr(body, "\"needed\":true")   != NULL ||
-           strstr(body, "\"needed\": true")  != NULL;
-}
-
 /* ------------------------------------------------------------------ */
 /* RTP header builder                                                   */
 /* ------------------------------------------------------------------ */
@@ -350,6 +300,50 @@ static void rtp_write_header(uint8_t *buf, int pt, bool marker,
     buf[9]  = (uint8_t)(ssrc >> 16);
     buf[10] = (uint8_t)(ssrc >>  8);
     buf[11] = (uint8_t)(ssrc);
+}
+
+/*
+ * Drain incoming RTCP packets from the video socket and detect keyframe
+ * feedback messages (PSFB PLI/FIR). Returns true if any request is found.
+ * Called with out->lock held.
+ */
+static bool video_sock_poll_keyframe_feedback(struct webrtc_output *out)
+{
+    if (!out || out->video_sock == INVALID_SOCK)
+        return false;
+
+    uint8_t buf[2048];
+    bool requested = false;
+
+    for (;;) {
+        int n = (int)recv(out->video_sock, (char *)buf, sizeof(buf), 0);
+        if (n <= 0)
+            break;
+
+        size_t off = 0;
+        while (off + 4 <= (size_t)n) {
+            const uint8_t v_p_count = buf[off + 0];
+            const uint8_t pt        = buf[off + 1];
+            const uint16_t length_words =
+                (uint16_t)(((uint16_t)buf[off + 2] << 8) | buf[off + 3]);
+            const size_t pkt_len = ((size_t)length_words + 1U) * 4U;
+
+            if (pkt_len < 4 || off + pkt_len > (size_t)n)
+                break;
+
+            /* RTCP PSFB (PT=206), FMT in low 5 bits of first byte.
+             * PLI: FMT=1, FIR: FMT=4. */
+            if (pt == 206) {
+                const uint8_t fmt = (uint8_t)(v_p_count & 0x1F);
+                if (fmt == 1 || fmt == 4)
+                    requested = true;
+            }
+
+            off += pkt_len;
+        }
+    }
+
+    return requested;
 }
 
 /* ------------------------------------------------------------------ */
@@ -617,12 +611,7 @@ shift:
 
 /*
  * Polls the mediasoup server for its RTP port allocation, then creates
- * and connects UDP sockets.  After connecting, continues to run and polls
- * /keyframe-needed every second.  When the server signals that a new
- * browser consumer has connected, sets needs_keyframe so the cached IDR
- * is injected into the RTP stream before the next P-frame, allowing the
- * new consumer's H.264 decoder to sync without waiting for the next
- * natural keyframe from the AirPlay device.
+ * and connects UDP sockets.
  */
 static void connect_thread(void *arg)
 {
@@ -674,6 +663,8 @@ static void connect_thread(void *arg)
             continue;
         }
 
+        sock_set_nonblocking(vs);
+
         mutex_lock(&out->lock);
         /* Close any previously opened sockets */
         if (out->video_sock != INVALID_SOCK) sock_close(out->video_sock);
@@ -691,20 +682,7 @@ static void connect_thread(void *arg)
                 "[WebRTC] Connected to mediasoup — video UDP port %d,"
                 " audio UDP port %d\n",
                 vport, aport);
-        break; /* proceed to keyframe poll loop */
-    }
-
-    /* Poll /keyframe-needed once per second for the lifetime of the output.
-     * When a new browser consumer connects, the server sets this flag so we
-     * can inject the cached IDR frame before the next P-frame. */
-    while (out->running) {
-        SLEEP_MS(1000);
-        if (http_get_keyframe_needed(out->mediasoup_port)) {
-            mutex_lock(&out->lock);
-            if (out->ready)
-                out->needs_keyframe = true;
-            mutex_unlock(&out->lock);
-        }
+        return;
     }
 }
 
@@ -768,6 +746,9 @@ void webrtc_output_write_video(struct webrtc_output *out,
     if (!out || !data || size == 0) return;
 
     mutex_lock(&out->lock);
+
+    if (out->ready && video_sock_poll_keyframe_feedback(out))
+        out->needs_keyframe = true;
 
     /* Always cache the most recent IDR frame so that when the AirPlay
      * stream restarts (webrtc_output_request_keyframe is called), an
