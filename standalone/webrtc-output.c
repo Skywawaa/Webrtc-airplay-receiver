@@ -31,7 +31,9 @@
 /* ------------------------------------------------------------------ */
 
 #ifdef _WIN32
-#  define WIN32_LEAN_AND_MEAN
+#  ifndef WIN32_LEAN_AND_MEAN
+#    define WIN32_LEAN_AND_MEAN
+#  endif
 #  include <winsock2.h>
 #  include <ws2tcpip.h>
 #  include <windows.h>
@@ -233,6 +235,15 @@ struct webrtc_output {
     bool transcode_active;
     int64_t transcode_frame_index;
 };
+
+/* Forward declarations for helpers referenced by transcode code before
+ * the concrete RFC6184 packetizer definitions below. */
+static void rtp_send_nal(struct webrtc_output *out,
+                         const uint8_t *nal, int nal_size,
+                         uint32_t ts, bool marker);
+static void rtp_send_h264(struct webrtc_output *out,
+                          const uint8_t *data, size_t size,
+                          uint32_t ts);
 
 static const char *video_mode_name(webrtc_video_mode_t mode)
 {
