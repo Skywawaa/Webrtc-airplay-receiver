@@ -288,6 +288,69 @@ static bool http_get_rtp_params(int port, int *video_port, int *audio_port)
 /* RTP header builder                                                   */
 /* ------------------------------------------------------------------ */
 
+/*
+ * Poll GET /keyframe-needed on the mediasoup HTTP server.
+ * Returns true if a new viewer is waiting for a keyframe.
+ */
+static bool http_get_keyframe_needed(int port)
+{
+    sock_t s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (s == INVALID_SOCK) return false;
+
+#ifdef _WIN32
+    DWORD tv_ms = 2000;
+    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (const char *)&tv_ms, sizeof(tv_ms));
+    setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, (const char *)&tv_ms, sizeof(tv_ms));
+#else
+    struct timeval tv = {2, 0};
+    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+#endif
+
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family      = AF_INET;
+    addr.sin_port        = htons((unsigned short)port);
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+
+    if (connect(s, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
+        sock_close(s);
+        return false;
+    }
+
+    const char *req =
+        "GET /keyframe-needed HTTP/1.0\r\n"
+        "Host: 127.0.0.1\r\n"
+        "Connection: close\r\n"
+        "\r\n";
+    if (send(s, req, (int)strlen(req), 0) < 0) {
+        sock_close(s);
+        return false;
+    }
+
+    char buf[512];
+    int  total = 0, r;
+    while (total < (int)(sizeof(buf) - 1) &&
+           (r = (int)recv(s, buf + total,
+                          sizeof(buf) - 1 - (size_t)total, 0)) > 0)
+        total += r;
+    sock_close(s);
+
+    if (total <= 0) return false;
+    buf[total] = '\0';
+
+    char *body = strstr(buf, "\r\n\r\n");
+    if (!body) return false;
+    body += 4;
+
+    return strstr(body, "\"needed\":true")   != NULL ||
+           strstr(body, "\"needed\": true")  != NULL;
+}
+
+/* ------------------------------------------------------------------ */
+/* RTP header builder                                                   */
+/* ------------------------------------------------------------------ */
+
 static void rtp_write_header(uint8_t *buf, int pt, bool marker,
                               uint16_t seq, uint32_t ts, uint32_t ssrc)
 {
@@ -685,7 +748,20 @@ static void connect_thread(void *arg)
                 "[WebRTC] Connected to mediasoup — video UDP port %d,"
                 " audio UDP port %d\n",
                 vport, aport);
-        return;
+        break; /* proceed to keyframe poll loop */
+    }
+
+    /* Poll /keyframe-needed once per second for the lifetime of the output.
+     * When a new browser viewer connects, the server sets this flag so we
+     * can inject the cached IDR frame for immediate playback. */
+    while (out->running) {
+        SLEEP_MS(1000);
+        if (http_get_keyframe_needed(out->mediasoup_port)) {
+            mutex_lock(&out->lock);
+            if (out->ready)
+                out->needs_keyframe = true;
+            mutex_unlock(&out->lock);
+        }
     }
 }
 

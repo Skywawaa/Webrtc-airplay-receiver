@@ -205,6 +205,10 @@ async function connect() {
         for (const params of consumerParams) {
             const consumer = await recvTransport.consume(params);
             tracks[consumer.kind] = consumer.track;
+
+            if (consumer.kind === 'video') {
+                fetch('/viewer-ready').catch(() => {});
+            }
         }
 
         if (tracks.video) {

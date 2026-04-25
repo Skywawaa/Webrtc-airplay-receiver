@@ -79,6 +79,7 @@ let audioPlainTransport;
 let videoProducer;
 let audioProducer;
 let connectedBrowsers = 0;
+let viewerKeyframeNeeded = false;
 
 /* ------------------------------------------------------------------ */
 /* mediasoup initialisation                                             */
@@ -255,18 +256,8 @@ function handleBrowserSocket(ws) {
                         });
 
                         if (consumer.kind === 'video') {
-                            /* Ask mediasoup to send RTCP keyframe feedback to the
-                             * RTP sender for this newly attached viewer.
-                             * A short retry improves reliability on join/reload. */
-                            try {
-                                await consumer.requestKeyFrame();
-                                console.log('[ws] video consumer created -> requestKeyFrame() sent');
-                                setTimeout(() => {
-                                    consumer.requestKeyFrame().catch(() => {});
-                                }, 250);
-                            } catch (err) {
-                                console.warn('[ws] requestKeyFrame failed:', err.message);
-                            }
+                            console.log('[ws] video consumer created (new viewer)');
+                            viewerKeyframeNeeded = true;
                         }
 
                         consumers.push({
@@ -324,6 +315,21 @@ async function startServer() {
             videoPort : videoPlainTransport.tuple.localPort,
             audioPort : audioPlainTransport.tuple.localPort,
         });
+    });
+
+    /* Keyframe request endpoint — called by browser after consumer created,
+     * polled by C sender via /keyframe-needed. */
+    app.get('/viewer-ready', (_req, res) => {
+        viewerKeyframeNeeded = true;
+        res.json({ ok: true });
+    });
+
+    /* Keyframe-needed endpoint — polled by airplay-stream.exe.
+     * Returns true if a new viewer is waiting for a keyframe. */
+    app.get('/keyframe-needed', (_req, res) => {
+        const needed = viewerKeyframeNeeded;
+        viewerKeyframeNeeded = false;
+        res.json({ needed });
     });
 
     /* WebSocket server for browser signalling */
