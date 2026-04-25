@@ -78,6 +78,7 @@ let videoPlainTransport;
 let audioPlainTransport;
 let videoProducer;
 let audioProducer;
+let connectedBrowsers = 0;
 
 /* ------------------------------------------------------------------ */
 /* mediasoup initialisation                                             */
@@ -172,7 +173,8 @@ async function startMediasoup() {
  *    { type: 'error', message }
  */
 function handleBrowserSocket(ws) {
-    console.log('[ws] browser connected');
+    connectedBrowsers++;
+    console.log(`[ws] browser connected (active: ${connectedBrowsers})`);
 
     /** @type {import('mediasoup').types.WebRtcTransport | null} */
     let recvTransport = null;
@@ -258,6 +260,7 @@ function handleBrowserSocket(ws) {
                              * A short retry improves reliability on join/reload. */
                             try {
                                 await consumer.requestKeyFrame();
+                                console.log('[ws] video consumer created -> requestKeyFrame() sent');
                                 setTimeout(() => {
                                     consumer.requestKeyFrame().catch(() => {});
                                 }, 250);
@@ -288,7 +291,8 @@ function handleBrowserSocket(ws) {
     });
 
     ws.on('close', () => {
-        console.log('[ws] browser disconnected');
+        connectedBrowsers = Math.max(connectedBrowsers - 1, 0);
+        console.log(`[ws] browser disconnected (active: ${connectedBrowsers})`);
         for (const consumer of recvConsumers.splice(0)) {
             try { consumer.close(); } catch {}
         }

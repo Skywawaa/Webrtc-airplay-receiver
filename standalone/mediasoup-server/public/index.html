@@ -36,6 +36,13 @@ const statusEl = document.getElementById('status');
 const videoEl  = document.getElementById('v');
 const unmuteBtn = document.getElementById('unmute');
 
+let activeWs = null;
+let activeTransport = null;
+let reconnectTimer = null;
+let connecting = false;
+let stopped = false;
+let sessionSeq = 0;
+
 unmuteBtn.addEventListener('click', () => {
     videoEl.muted = false;
     unmuteBtn.style.display = 'none';
@@ -47,102 +54,179 @@ function setStatus(text, fade) {
     if (fade) setTimeout(() => { statusEl.style.opacity = '0'; }, 2500);
 }
 
-async function connect() {
-    setStatus('Connecting…');
-
-    const device = new mediasoupClient.Device();
-    const proto  = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const ws     = new WebSocket(`${proto}//${location.host}`);
-
-    ws.onclose = ws.onerror = () => {
-        setStatus('Disconnected — reconnecting…');
-        setTimeout(connect, 3000);
-    };
-
-    /** Promise helpers so we can await individual WS messages by type. */
-    const pending = {};
-    ws.onmessage = (evt) => {
-        const msg = JSON.parse(evt.data);
-        if (pending[msg.type]) {
-            const { resolve } = pending[msg.type];
-            delete pending[msg.type];
-            resolve(msg.data !== undefined ? msg.data : msg);
-        } else if (msg.type === 'error') {
-            console.error('[ws] server error:', msg.message);
-        }
-    };
-
-    function send(obj)     { ws.send(JSON.stringify(obj)); }
-    function waitFor(type) {
-        return new Promise((resolve) => { pending[type] = { resolve }; });
+function clearReconnectTimer() {
+    if (reconnectTimer) {
+        clearTimeout(reconnectTimer);
+        reconnectTimer = null;
     }
-
-    await new Promise((resolve) => { ws.onopen = resolve; });
-
-    /* ---- Step 1: load Device with router RTP capabilities ---- */
-    send({ type: 'getRtpCapabilities' });
-    const rtpCapabilities = await waitFor('rtpCapabilities');
-    await device.load({ routerRtpCapabilities: rtpCapabilities });
-
-    /* ---- Step 2: create receive transport ---- */
-    send({ type: 'createTransport' });
-    const transportParams = await waitFor('transportCreated');
-
-    let connectResolve;
-    const recvTransport = device.createRecvTransport(transportParams);
-
-    recvTransport.on('connect', ({ dtlsParameters }, callback, errback) => {
-        connectResolve = callback;
-        send({ type: 'connectTransport', dtlsParameters });
-    });
-
-    /* ---- Step 3: request consumers from server ---- */
-    send({ type: 'consume', rtpCapabilities: device.rtpCapabilities });
-    const consumerParams = await waitFor('consumed');
-
-    /* ---- Step 4: create client-side consumers ----
-     * Register the transportConnected handler *before* the first consume()
-     * call, because consume() fires the 'connect' event which sends
-     * connectTransport to the server, and the server replies immediately
-     * with transportConnected.  Waiting for transportConnected inside
-     * Promise.all() alongside consumed causes a deadlock: consumed arrives
-     * first, but transportConnected can only arrive after recvTransport
-     * .consume() is called, which only happens after the Promise.all
-     * resolves — so it never resolves. */
-    waitFor('transportConnected').then(() => {
-        if (connectResolve) {
-            connectResolve();
-            connectResolve = null;
-        }
-    });
-
-    const tracks = { video: null, audio: null };
-    for (const params of consumerParams) {
-        const consumer = await recvTransport.consume(params);
-        tracks[consumer.kind] = consumer.track;
-    }
-
-    /* Attach video track and show unmute button */
-    if (tracks.video) {
-        const stream = new MediaStream([tracks.video]);
-        if (tracks.audio) stream.addTrack(tracks.audio);
-        videoEl.srcObject = stream;
-        unmuteBtn.style.display = 'block';
-    }
-
-    setStatus('Connected ✓', true);
-    ws.onclose = ws.onerror = () => {
-        setStatus('Disconnected — reconnecting…');
-        recvTransport.close();
-        setTimeout(connect, 3000);
-    };
 }
 
-connect().catch((err) => {
-    console.error(err);
-    setStatus('Error: ' + err.message);
-    setTimeout(connect, 5000);
+function scheduleReconnect(delayMs = 1500) {
+    if (stopped || reconnectTimer) return;
+    setStatus('Disconnected - reconnecting...');
+    reconnectTimer = setTimeout(() => {
+        reconnectTimer = null;
+        connect().catch(() => {});
+    }, delayMs);
+}
+
+function closeActiveSession() {
+    if (activeTransport) {
+        try { activeTransport.close(); } catch {}
+        activeTransport = null;
+    }
+    if (activeWs) {
+        try { activeWs.onclose = null; } catch {}
+        try { activeWs.onerror = null; } catch {}
+        try { activeWs.close(); } catch {}
+        activeWs = null;
+    }
+}
+
+window.addEventListener('beforeunload', () => {
+    stopped = true;
+    clearReconnectTimer();
+    closeActiveSession();
 });
+
+async function connect() {
+    if (stopped || connecting) return;
+    if (activeWs &&
+        (activeWs.readyState === WebSocket.OPEN ||
+         activeWs.readyState === WebSocket.CONNECTING)) {
+        return;
+    }
+
+    connecting = true;
+    const sessionId = ++sessionSeq;
+
+    setStatus('Connecting…');
+
+    try {
+        const device = new mediasoupClient.Device();
+        const proto  = location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const ws     = new WebSocket(`${proto}//${location.host}`);
+        activeWs = ws;
+
+        /** Promise helpers so we can await individual WS messages by type. */
+        const pending = {};
+        function failPending(reason) {
+            for (const k of Object.keys(pending)) {
+                const p = pending[k];
+                delete pending[k];
+                if (p && p.reject) p.reject(reason);
+            }
+        }
+
+        ws.onmessage = (evt) => {
+            let msg;
+            try {
+                msg = JSON.parse(evt.data);
+            } catch {
+                return;
+            }
+
+            if (pending[msg.type]) {
+                const { resolve } = pending[msg.type];
+                delete pending[msg.type];
+                resolve(msg.data !== undefined ? msg.data : msg);
+            } else if (msg.type === 'error') {
+                console.error('[ws] server error:', msg.message);
+            }
+        };
+
+        function send(obj) {
+            if (ws.readyState === WebSocket.OPEN)
+                ws.send(JSON.stringify(obj));
+        }
+        function waitFor(type) {
+            return new Promise((resolve, reject) => {
+                pending[type] = { resolve, reject };
+            });
+        }
+
+        ws.onerror = () => {
+            if (sessionId !== sessionSeq) return;
+            setStatus('Network error - reconnecting...');
+        };
+
+        ws.onclose = () => {
+            if (sessionId !== sessionSeq) return;
+            failPending(new Error('WebSocket closed'));
+            if (activeTransport) {
+                try { activeTransport.close(); } catch {}
+                activeTransport = null;
+            }
+            activeWs = null;
+            scheduleReconnect(1200);
+        };
+
+        await new Promise((resolve, reject) => {
+            ws.onopen = resolve;
+            ws.onerror = () => reject(new Error('WebSocket connect failed'));
+        });
+
+        ws.onerror = () => {
+            if (sessionId !== sessionSeq) return;
+            setStatus('Network error - reconnecting...');
+        };
+
+        /* ---- Step 1: load Device with router RTP capabilities ---- */
+        send({ type: 'getRtpCapabilities' });
+        const rtpCapabilities = await waitFor('rtpCapabilities');
+        await device.load({ routerRtpCapabilities: rtpCapabilities });
+
+        /* ---- Step 2: create receive transport ---- */
+        send({ type: 'createTransport' });
+        const transportParams = await waitFor('transportCreated');
+
+        let connectResolve;
+        const recvTransport = device.createRecvTransport(transportParams);
+        activeTransport = recvTransport;
+
+        recvTransport.on('connect', ({ dtlsParameters }, callback) => {
+            connectResolve = callback;
+            send({ type: 'connectTransport', dtlsParameters });
+        });
+
+        /* ---- Step 3: request consumers from server ---- */
+        send({ type: 'consume', rtpCapabilities: device.rtpCapabilities });
+        const consumerParams = await waitFor('consumed');
+
+        /* ---- Step 4: create client-side consumers ---- */
+        waitFor('transportConnected').then(() => {
+            if (connectResolve) {
+                connectResolve();
+                connectResolve = null;
+            }
+        }).catch(() => {});
+
+        const tracks = { video: null, audio: null };
+        for (const params of consumerParams) {
+            const consumer = await recvTransport.consume(params);
+            tracks[consumer.kind] = consumer.track;
+        }
+
+        if (tracks.video) {
+            const stream = new MediaStream([tracks.video]);
+            if (tracks.audio) stream.addTrack(tracks.audio);
+            videoEl.srcObject = stream;
+            unmuteBtn.style.display = 'block';
+        }
+
+        clearReconnectTimer();
+        setStatus('Connected ✓', true);
+    } catch (err) {
+        console.error(err);
+        setStatus('Error: ' + err.message);
+        closeActiveSession();
+        scheduleReconnect(1500);
+    } finally {
+        connecting = false;
+    }
+}
+
+connect().catch(() => {});
 </script>
 </body>
 </html>

@@ -193,6 +193,9 @@ struct webrtc_output {
     size_t   keyframe_cache_size;
     int64_t  keyframe_cache_pts_us;
     bool     needs_keyframe;  /* inject cached KF before next P-frame */
+
+    uint64_t rtcp_keyframe_req_count;
+    uint64_t injected_keyframe_count;
 };
 
 /* ------------------------------------------------------------------ */
@@ -748,7 +751,13 @@ void webrtc_output_write_video(struct webrtc_output *out,
     mutex_lock(&out->lock);
 
     if (out->ready && video_sock_poll_keyframe_feedback(out))
+    {
         out->needs_keyframe = true;
+        out->rtcp_keyframe_req_count++;
+        fprintf(stdout,
+                "[WebRTC] RTCP keyframe feedback received (count=%llu)\n",
+                (unsigned long long)out->rtcp_keyframe_req_count);
+    }
 
     /* Always cache the most recent IDR frame so that when the AirPlay
      * stream restarts (webrtc_output_request_keyframe is called), an
@@ -762,6 +771,9 @@ void webrtc_output_write_video(struct webrtc_output *out,
             out->keyframe_cache_size = size;
             out->keyframe_cache_pts_us = pts_us;
             memcpy(out->keyframe_cache, data, size);
+            fprintf(stdout,
+                    "[WebRTC] Cached fresh IDR (%zu bytes, pts=%lld us)\n",
+                    size, (long long)pts_us);
         } else {
             fprintf(stderr,
                     "[WebRTC] Warning: keyframe cache allocation failed"
@@ -789,6 +801,17 @@ void webrtc_output_write_video(struct webrtc_output *out,
                 rtp_send_h264(out, out->keyframe_cache,
                               out->keyframe_cache_size, kf_ts);
                 out->needs_keyframe = false;
+                out->injected_keyframe_count++;
+                fprintf(stdout,
+                        "[WebRTC] Injected cached IDR for viewer sync "
+                        "(count=%llu, age=%lld us)\n",
+                        (unsigned long long)out->injected_keyframe_count,
+                        (long long)age_us);
+            } else {
+                fprintf(stdout,
+                        "[WebRTC] Deferred keyframe injection: cache age %lld us "
+                        "(max %d us), waiting for natural IDR\n",
+                        (long long)age_us, KEYFRAME_CACHE_MAX_AGE_US);
             }
         }
 
