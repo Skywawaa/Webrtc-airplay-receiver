@@ -67,9 +67,17 @@ static LONG WINAPI thread_exception_filter(LPEXCEPTION_POINTERS info)
 
 static void thread_wrapper(void (*fn)(void *), void *arg)
 {
+    fprintf(stderr, "[WebRTC] thread_wrapper: before __try\n");
+    fflush(stderr);
     __try {
+        fprintf(stderr, "[WebRTC] thread_wrapper: calling fn\n");
+        fflush(stderr);
         fn(arg);
+        fprintf(stderr, "[WebRTC] thread_wrapper: fn returned\n");
+        fflush(stderr);
     } __except(thread_exception_filter(GetExceptionInformation())) {
+        fprintf(stderr, "[WebRTC] thread_wrapper: caught exception\n");
+        fflush(stderr);
     }
 }
 
@@ -1071,30 +1079,26 @@ shift:
 static void connect_thread(void *arg)
 {
     struct webrtc_output *out = (struct webrtc_output *)arg;
+    int port = out->mediasoup_port;
 
-    fprintf(stdout,
-            "[WebRTC] Waiting for mediasoup server on port %d …\n",
-            out->mediasoup_port);
-    fflush(stdout);
+    /* Use stderr for immediate output */
+    fprintf(stderr, "[WebRTC] connect_thread: starting (port=%d)\n", port);
+    fflush(stderr);
 
     for (int tries = 0; out->running; tries++) {
         if (tries > 0) SLEEP_MS(1000);
         if (tries >= CONNECT_MAX_TRIES) {
-            fprintf(stderr,
-                    "[WebRTC] mediasoup server not reachable after %d seconds"
-                    " — still retrying\n",
-                    tries);
+            fprintf(stderr, "[WebRTC] timeout after %d tries\n", tries);
             fflush(stderr);
-            /* Reset counter to keep retrying indefinitely */
             tries = 0;
         }
 
         int vport = 0, aport = 0;
-        fprintf(stdout, "[WebRTC] Trying HTTP GET /rtp-params...\n");
-        fflush(stdout);
-        if (!http_get_rtp_params(out->mediasoup_port, &vport, &aport)) {
-            fprintf(stdout, "[WebRTC] HTTP GET failed, retrying...\n");
-            fflush(stdout);
+        fprintf(stderr, "[WebRTC] http_get_rtp_params...\n");
+        fflush(stderr);
+        if (!http_get_rtp_params(port, &vport, &aport)) {
+            fprintf(stderr, "[WebRTC] http failed\n");
+            fflush(stderr);
             continue;
         }
         fprintf(stdout, "[WebRTC] Got ports: video=%d, audio=%d\n", vport, aport);
