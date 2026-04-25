@@ -1215,17 +1215,8 @@ struct webrtc_output *webrtc_output_create_with_options(
 
     fprintf(stdout, "[WebRTC] Initializing Opus encoder...\n");
     fflush(stdout);
-    /* Check if audio is disabled via env var */
-    if (getenv("AIRPLAY_NO_AUDIO") != NULL) {
-        out->opus_disabled = true;
-    } else {
-        if (!opus_encoder_init(out)) {
-            out->opus_disabled = true;
-            fprintf(stderr,
-                    "[WebRTC] Warning: Opus init failed at startup, continuing without audio\n");
-            fflush(stderr);
-        }
-    }
+    out->opus_disabled = true;
+    fprintf(stdout, "[WebRTC] Opus encoder: disabled (not supported)\n");
 
     fprintf(stdout, "[WebRTC] Starting connect thread...\n");
     fflush(stdout);
@@ -1422,12 +1413,14 @@ void webrtc_output_write_audio(struct webrtc_output *out,
 
     if (!out || !pcm || samples <= 0) return;
 
+    /* Check if audio is disabled */
     if (out->opus_disabled)
         return;
 
     mutex_lock(&out->lock);
 
     if (!out->opus_ctx || !out->opus_frame || !out->opus_pkt) {
+        /* Try late init only if not already marked disabled */
         if (!opus_encoder_init(out)) {
             out->opus_disabled = true;
             fprintf(stderr,
