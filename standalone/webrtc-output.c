@@ -144,7 +144,7 @@ static void thread_start(void (*fn)(void *), void *arg) {
 /* New viewers may join between packets or miss the first reinjected IDR.
  * Send a short bounded burst of cached IDRs after a viewer request so the
  * decoder has a better chance to lock without a permanent periodic flash. */
-#define KEYFRAME_BURST_COUNT       3
+#define KEYFRAME_BURST_COUNT       1
 #define KEYFRAME_BURST_INTERVAL_US 200000
 
 /* Temporary stack buffer for one SWR resample call (per-channel samples) */
