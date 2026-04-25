@@ -904,7 +904,12 @@ static bool opus_encoder_init(struct webrtc_output *out)
     av_channel_layout_default(&out->opus_ctx->ch_layout, OPUS_CHANNELS);
     out->opus_ctx->bit_rate   = 64000;
     out->opus_ctx->frame_size = OPUS_FRAME_SIZE;
-    av_opt_set(out->opus_ctx->priv_data, "application", "lowdelay", 0);
+
+    /* Some FFmpeg builds/codecs expose no writable priv_data options.
+     * Keep startup robust by only setting optional tuning when available. */
+    if (out->opus_ctx->priv_data) {
+        av_opt_set(out->opus_ctx->priv_data, "application", "lowdelay", 0);
+    }
 
     if (avcodec_open2(out->opus_ctx, out->opus_codec, NULL) < 0) {
         fprintf(stderr, "[WebRTC] Failed to open Opus encoder\n");
@@ -1141,11 +1146,6 @@ struct webrtc_output *webrtc_output_create_with_options(
         out->selected_video_encoder =
             find_video_encoder_by_preference(out->video_encoder_preference);
         if (out->selected_video_encoder) {
-            if (!transcode_init_decoder(out)) {
-                fprintf(stdout,
-                        "[WebRTC] Transcode decode init failed; falling back to passthrough\n");
-                out->video_mode = WEBRTC_VIDEO_MODE_PASSTHROUGH;
-            }
             fprintf(stdout,
                     "[WebRTC] Video mode=%s, encoder_pref=%s, selected=%s\n",
                     video_mode_name(out->video_mode),
@@ -1231,14 +1231,38 @@ void webrtc_output_write_video(struct webrtc_output *out,
     }
 
     if (out->video_mode == WEBRTC_VIDEO_MODE_TRANSCODE_AUTO &&
-        out->selected_video_encoder && out->video_dec_ctx) {
-        if (!out->ready || out->video_sock == INVALID_SOCK) {
+        out->selected_video_encoder) {
+        if (!out->video_dec_ctx) {
+            if (!transcode_init_decoder(out)) {
+                if (!out->transcode_warning_logged) {
+                    out->transcode_warning_logged = true;
+                    fprintf(stderr,
+                            "[WebRTC] Transcode decode init failed; falling back to passthrough\n");
+                }
+                out->video_mode = WEBRTC_VIDEO_MODE_PASSTHROUGH;
+            }
+        }
+
+        if (out->video_mode != WEBRTC_VIDEO_MODE_TRANSCODE_AUTO ||
+            !out->video_dec_ctx) {
+            /* Decoder init failed: continue with passthrough path below. */
+        } else {
+            if (!out->ready || out->video_sock == INVALID_SOCK) {
+                mutex_unlock(&out->lock);
+                return;
+            }
+            transcode_process_video(out, data, size, pts_us);
             mutex_unlock(&out->lock);
             return;
         }
-        transcode_process_video(out, data, size, pts_us);
-        mutex_unlock(&out->lock);
-        return;
+    }
+
+    if (out->video_mode == WEBRTC_VIDEO_MODE_TRANSCODE_AUTO &&
+        !out->selected_video_encoder && !out->transcode_warning_logged) {
+        out->transcode_warning_logged = true;
+        fprintf(stderr,
+                "[WebRTC] Transcode mode requested but no encoder selected; using passthrough\n");
+        out->video_mode = WEBRTC_VIDEO_MODE_PASSTHROUGH;
     }
 
     /* Always cache the most recent IDR frame so that when the AirPlay

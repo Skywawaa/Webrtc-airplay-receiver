@@ -509,19 +509,19 @@ jobs:
       - name: Download FFmpeg shared DLLs (for standalone bundle)
         shell: pwsh
         run: |
-          $url = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n7.1-latest-win64-gpl-shared-7.1.zip"
+          $url = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl-shared.zip"
           $dest = "$env:TEMP\ffmpeg-shared.zip"
           $extractDir = "$env:TEMP\ffmpeg-shared"
           Invoke-WebRequest -Uri $url -OutFile $dest -MaximumRetryCount 3 -RetryIntervalSec 5
           Expand-Archive -Path $dest -DestinationPath $extractDir -Force
-          $ffmpegDir = Get-ChildItem -Path $extractDir -Directory | Where-Object { $_.Name -like 'ffmpeg-n7.1*' } | Select-Object -First 1 -ExpandProperty FullName
+          $ffmpegDir = Get-ChildItem -Path $extractDir -Directory | Where-Object { $_.Name -like 'ffmpeg-master*' } | Select-Object -First 1 -ExpandProperty FullName
           if (-not $ffmpegDir) {
-            Write-Error "Could not find expected ffmpeg-n7.1* directory in $extractDir. Available: $(Get-ChildItem $extractDir | Select-Object -ExpandProperty Name)"
+            Write-Error "Could not find expected ffmpeg-master* directory in $extractDir. Available: $(Get-ChildItem $extractDir | Select-Object -ExpandProperty Name)"
             exit 1
           }
           Write-Host "Found FFmpeg dir: $ffmpegDir"
           New-Item -ItemType Directory -Force -Path ffmpeg-dlls | Out-Null
-          foreach ($dll in @('avcodec', 'avutil', 'avformat', 'swresample')) {
+          foreach ($dll in @('avcodec', 'avutil', 'avformat', 'swresample', 'swscale')) {
             $found = Get-ChildItem -Path "$ffmpegDir\bin" -Filter "${dll}-*.dll" -ErrorAction SilentlyContinue
             if ($found) { Copy-Item $found.FullName -Destination ffmpeg-dlls\ }
             else { Write-Warning "Warning: $dll DLL not found in $ffmpegDir\bin\" }
