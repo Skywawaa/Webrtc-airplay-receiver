@@ -196,6 +196,8 @@ struct webrtc_output {
 
     uint64_t rtcp_keyframe_req_count;
     uint64_t injected_keyframe_count;
+    uint64_t idr_received_count;
+    int64_t  last_idr_pts_us;
 };
 
 /* ------------------------------------------------------------------ */
@@ -840,6 +842,17 @@ void webrtc_output_write_video(struct webrtc_output *out,
      * up-to-date keyframe is available for immediate injection. */
     bool is_idr = h264_has_idr(data, size);
     if (is_idr) {
+        out->idr_received_count++;
+        out->last_idr_pts_us = pts_us;
+        fprintf(stdout,
+                "[WebRTC] IDR frame received (count=%llu, pts=%lld us, "
+                "time_since_last_idr=%.1f ms)\n",
+                (unsigned long long)out->idr_received_count,
+                (long long)pts_us,
+                out->last_idr_pts_us > 0
+                    ? (double)(pts_us - out->keyframe_cache_pts_us) / 1000.0
+                    : 0.0);
+
         uint8_t *new_cache = (uint8_t *)malloc(size);
         if (new_cache) {
             free(out->keyframe_cache);
