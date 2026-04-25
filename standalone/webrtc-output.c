@@ -233,6 +233,7 @@ struct webrtc_output {
     AVFrame         *opus_frame;
     AVPacket        *opus_pkt;
     bool            opus_disabled;
+    enum AVSampleFormat opus_sample_fmt;  /* actual fmt after avcodec_open2 */
 
     /* SWR resampler: input rate → 48 kHz */
     struct SwrContext *swr;
@@ -942,7 +943,6 @@ static bool opus_encoder_init(struct webrtc_output *out)
     out->opus_ctx->bit_rate    = 64000;
     av_channel_layout_default(&out->opus_ctx->ch_layout, OPUS_CHANNELS);
 
-    /* Force float input — our audio_buf is always float32 */
     out->opus_ctx->sample_fmt = AV_SAMPLE_FMT_FLT;
 
     fprintf(stdout, "[WebRTC] Opening Opus encoder (%s)...\n",
@@ -955,33 +955,62 @@ static bool opus_encoder_init(struct webrtc_output *out)
         return false;
     }
 
+    out->opus_sample_fmt    = out->opus_ctx->sample_fmt;
     int actual_frame_size = out->opus_ctx->frame_size;
-    fprintf(stdout, "[WebRTC] Opus open OK: fmt=%d frame_size=%d\n",
-            (int)out->opus_ctx->sample_fmt, actual_frame_size);
+
+    fprintf(stdout, "[WebRTC] Opus open OK: fmt=%d (%s) frame_size=%d\n",
+            (int)out->opus_sample_fmt,
+            av_get_sample_fmt_name(out->opus_sample_fmt),
+            actual_frame_size);
     fflush(stdout);
 
     out->opus_frame = av_frame_alloc();
     out->opus_pkt   = av_packet_alloc();
-    if (!out->opus_frame || !out->opus_pkt) goto fail;
-
-    out->opus_frame->nb_samples  = actual_frame_size;
-    out->opus_frame->sample_rate = OPUS_SAMPLE_RATE;
-    out->opus_frame->format      = out->opus_ctx->sample_fmt;
-    /* Do NOT copy from opus_ctx->ch_layout — libopus uses CUSTOM order */
-    av_channel_layout_default(&out->opus_frame->ch_layout, OPUS_CHANNELS);
-
-    if (av_frame_get_buffer(out->opus_frame, 0) < 0) {
-        fprintf(stderr, "[WebRTC] av_frame_get_buffer (Opus) failed\n");
+    if (!out->opus_frame || !out->opus_pkt) {
+        fprintf(stderr, "[WebRTC] av_frame/pkt alloc failed\n");
         goto fail;
     }
 
+    out->opus_frame->nb_samples  = actual_frame_size;
+    out->opus_frame->sample_rate = OPUS_SAMPLE_RATE;
+    out->opus_frame->format      = (int)out->opus_sample_fmt;
+    av_channel_layout_default(&out->opus_frame->ch_layout, OPUS_CHANNELS);
+
+    {
+        uint8_t *plane_data[OPUS_CHANNELS];
+        int linesize = 0;
+        int alloc_ret = av_samples_alloc(plane_data, &linesize,
+                                          OPUS_CHANNELS, actual_frame_size,
+                                          out->opus_sample_fmt, 32);
+        if (alloc_ret < 0) {
+            fprintf(stderr, "[WebRTC] av_samples_alloc (Opus) failed: %d\n",
+                    alloc_ret);
+            goto fail;
+        }
+        for (int i = 0; i < OPUS_CHANNELS; i++)
+            out->opus_frame->data[i] = plane_data[i];
+        out->opus_frame->linesize[0] = linesize;
+
+        out->opus_frame->buf[0] = av_buffer_create(
+            plane_data[0], (size_t)alloc_ret,
+            av_buffer_default_free, NULL, 0);
+        if (!out->opus_frame->buf[0]) {
+            av_freep(&plane_data[0]);
+            goto fail;
+        }
+    }
+
     fprintf(stdout, "[WebRTC] Opus encoder ready: %s\n", out->opus_codec->name);
+    fflush(stdout);
     return true;
 
 fail:
-    av_frame_free(&out->opus_frame);
-    av_packet_free(&out->opus_pkt);
-    avcodec_free_context(&out->opus_ctx);
+    if (out->opus_frame) av_frame_free(&out->opus_frame);
+    if (out->opus_pkt)   av_packet_free(&out->opus_pkt);
+    if (out->opus_ctx) {
+        avcodec_send_frame(out->opus_ctx, NULL);
+        avcodec_free_context(&out->opus_ctx);
+    }
     return false;
 }
 
@@ -1026,22 +1055,35 @@ static bool ensure_swr(struct webrtc_output *out, int in_rate, int in_ch)
 }
 
 /*
- * Encode one OPUS_FRAME_SIZE block from audio_buf and send as RTP.
+ * Encode one Opus frame block from audio_buf and send as RTP.
  * Called with out->lock held.
  */
 static void flush_opus_frame(struct webrtc_output *out)
 {
-    if (!out->opus_ctx || !out->opus_frame) return;
+    if (!out->opus_ctx || !out->opus_frame || !out->opus_pkt) return;
 
-    memcpy(out->opus_frame->data[0],
-           out->audio_buf,
-           (size_t)(out->opus_ctx->frame_size * OPUS_CHANNELS) * sizeof(float));
+    int fs = out->opus_ctx->frame_size;
+
+    if (out->opus_sample_fmt == AV_SAMPLE_FMT_FLTP) {
+        float *ch0 = (float *)out->opus_frame->data[0];
+        float *ch1 = (float *)out->opus_frame->data[1];
+        const float *src = out->audio_buf;
+        for (int i = 0; i < fs; i++) {
+            ch0[i] = src[i * OPUS_CHANNELS + 0];
+            ch1[i] = src[i * OPUS_CHANNELS + 1];
+        }
+    } else {
+        memcpy(out->opus_frame->data[0],
+               out->audio_buf,
+               (size_t)(fs * OPUS_CHANNELS) * sizeof(float));
+    }
+
     out->opus_frame->pts = out->audio_rtp_ts;
 
     if (avcodec_send_frame(out->opus_ctx, out->opus_frame) < 0) goto shift;
 
     while (avcodec_receive_packet(out->opus_ctx, out->opus_pkt) == 0) {
-        int     plen = out->opus_pkt->size;
+        int plen = out->opus_pkt->size;
         uint8_t pkt[12 + 1276];
         if (plen <= (int)(sizeof(pkt) - 12)) {
             rtp_write_header(pkt, OPUS_PT, false,
@@ -1051,21 +1093,17 @@ static void flush_opus_frame(struct webrtc_output *out)
             memcpy(pkt + 12, out->opus_pkt->data, (size_t)plen);
             if (out->audio_sock != INVALID_SOCK)
                 send(out->audio_sock, (const char *)pkt, 12 + plen, 0);
-        } else {
-            fprintf(stderr,
-                    "[WebRTC] Opus packet too large (%d bytes), dropping\n",
-                    plen);
         }
         av_packet_unref(out->opus_pkt);
     }
 
 shift:
-    out->audio_rtp_ts += out->opus_ctx->frame_size;
+    out->audio_rtp_ts += (uint32_t)fs;
 
-    int remain = out->audio_buf_n - out->opus_ctx->frame_size;
+    int remain = out->audio_buf_n - fs;
     if (remain > 0) {
         memmove(out->audio_buf,
-                out->audio_buf + (size_t)(out->opus_ctx->frame_size * OPUS_CHANNELS),
+                out->audio_buf + (size_t)(fs * OPUS_CHANNELS),
                 (size_t)(remain * OPUS_CHANNELS) * sizeof(float));
     }
     out->audio_buf_n = (remain > 0) ? remain : 0;
@@ -1468,7 +1506,7 @@ void webrtc_output_write_audio(struct webrtc_output *out,
         out->audio_buf_n += copy;
 
         if (out->opus_ctx &&
-        out->audio_buf_n >= out->opus_ctx->frame_size)
+            out->audio_buf_n >= out->opus_ctx->frame_size)
             flush_opus_frame(out);
     }
 
