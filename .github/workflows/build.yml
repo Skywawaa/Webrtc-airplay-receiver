@@ -494,7 +494,39 @@ jobs:
           $url = "https://github.com/obsproject/obs-studio/releases/download/32.1.2/OBS-Studio-32.1.2-Windows-x64.zip"
           $dest = "$env:TEMP\obs-release.zip"
           $extractDir = "$env:TEMP\obs-release"
-          Invoke-WebRequest -Uri $url -OutFile $dest -MaximumRetryCount 3 -RetryIntervalSec 5
+
+          $downloaded = $false
+          $attempts = 8
+          for ($i = 1; $i -le $attempts; $i++) {
+            try {
+              if (Test-Path $dest) { Remove-Item $dest -Force }
+              Write-Host "Downloading OBS release (attempt $i/$attempts)..."
+              Invoke-WebRequest -Uri $url -OutFile $dest -MaximumRetryCount 0 -TimeoutSec 180
+
+              $size = (Get-Item $dest).Length
+              if ($size -lt 50MB) {
+                throw "Downloaded file too small ($size bytes), likely an error page"
+              }
+
+              $downloaded = $true
+              Write-Host "OBS download succeeded ($size bytes)"
+              break
+            }
+            catch {
+              Write-Warning "OBS download failed on attempt $i: $($_.Exception.Message)"
+              if ($i -lt $attempts) {
+                $sleepSec = [Math]::Min(60, 5 * $i)
+                Write-Host "Retrying in $sleepSec seconds..."
+                Start-Sleep -Seconds $sleepSec
+              }
+            }
+          }
+
+          if (-not $downloaded) {
+            Write-Error "Failed to download OBS release zip after $attempts attempts"
+            exit 1
+          }
+
           Expand-Archive -Path $dest -DestinationPath $extractDir -Force
           $dll = Get-ChildItem -Path $extractDir -Recurse -Filter "w32-pthreads.dll" | Select-Object -First 1
           if (-not $dll) {
