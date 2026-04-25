@@ -149,10 +149,10 @@ static void thread_start(void (*fn)(void *), void *arg) {
 
 /*
  * Maximum age for a cached IDR that can be safely re-injected for a new
- * viewer. Older keyframes are likely from a different GOP and can freeze
- * playback on that stale image.
+ * viewer. AirPlay screen capture typically has GOPs of 2-5 seconds.
+ * Allow up to 10 seconds to cover normal reload/reconnect scenarios.
  */
-#define KEYFRAME_CACHE_MAX_AGE_US 500000
+#define KEYFRAME_CACHE_MAX_AGE_US 10000000
 
 /* ------------------------------------------------------------------ */
 /* State                                                                */
