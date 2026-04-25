@@ -70,13 +70,13 @@ static void thread_wrapper(void (*fn)(void *), void *arg)
     fprintf(stderr, "[WebRTC] thread_wrapper: before __try\n");
     fflush(stderr);
     __try {
-        fprintf(stderr, "[WebRTC] thread_wrapper: calling fn\n");
+        fprintf(stderr, "[WebRTC] thread_wrapper: calling fn(arg=%p)\n", arg);
         fflush(stderr);
         fn(arg);
         fprintf(stderr, "[WebRTC] thread_wrapper: fn returned\n");
         fflush(stderr);
-    } __except(thread_exception_filter(GetExceptionInformation())) {
-        fprintf(stderr, "[WebRTC] thread_wrapper: caught exception\n");
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        fprintf(stderr, "[WebRTC] thread_wrapper: caught exception, continuing\n");
         fflush(stderr);
     }
 }
@@ -1078,8 +1078,13 @@ shift:
  */
 static void connect_thread(void *arg)
 {
+    fprintf(stderr, "[WebRTC] connect_thread: entered\n");
+    fflush(stderr);
+
     struct webrtc_output *out = (struct webrtc_output *)arg;
     int port = out->mediasoup_port;
+    fprintf(stderr, "[WebRTC] connect_thread: out=%p, port=%d\n", (void*)out, port);
+    fflush(stderr);
 
     /* Use stderr for immediate output */
     fprintf(stderr, "[WebRTC] connect_thread: starting (port=%d)\n", port);
